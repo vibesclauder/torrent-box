@@ -9,6 +9,7 @@ Used by setup.sh only; each subcommand does one small job:
   jellyfin-setup CONFIG   Jellyfin's first-run wizard: admin user and libraries
   jellyfin-login          does JF_USER / JF_PASSWORD work as a Jellyfin admin?
   jellyfin-hwaccel DEV    switch on hardware transcoding (vainfo's output on stdin), if off
+  jellyfin-key APP        Jellyfin's API key for APP (made if missing), for setup.sh to capture
   smartd-conf LINE        /etc/smartd.conf on stdin, with our storage disk line, to stdout
   seerr-setup             Seerr's first-run setup: Jellyfin sign-in, libraries, Sonarr, Radarr
   ncore-code              enter a fresh nCore 2FA code in Prowlarr (when its session expired)
@@ -21,7 +22,7 @@ Used by setup.sh only; each subcommand does one small job:
   random-topic            a fresh ntfy topic
   tailscale-status        state, name and IPv4 from `tailscale status --json` on stdin
 Secrets (passwords) are passed through the environment, never on the command line, and
-never printed.
+never printed (but jellyfin-key's key, which setup.sh reads with $(...)).
 """
 
 import argparse
@@ -847,6 +848,26 @@ def jellyfin_setup(config_path, user, password, base=JELLYFIN):
     yield "first-run wizard completed"
 
 
+def jellyfin_api_key(user, password, app, base=JELLYFIN):
+    """The API key Jellyfin keeps for APP (Dashboard -> API Keys), made if there's none."""
+    token, admin = jellyfin_auth(user, password, base)
+    if not admin:
+        raise OSError(f"{user} is not a Jellyfin admin")
+    auth = {"Authorization": f'{JF_CLIENT}, Token="{token}"'}
+
+    def find():
+        keys = (http_json("GET", f"{base}/Auth/Keys", headers=auth) or {}).get("Items") or []
+        return next((k["AccessToken"] for k in keys if k.get("AppName") == app), None)
+
+    key = find()
+    if not key:
+        http_json("POST", f"{base}/Auth/Keys?" + urllib.parse.urlencode({"app": app}), headers=auth)
+        key = find()
+    if not key:
+        raise OSError(f"Jellyfin didn't make an API key for {app}")
+    return key
+
+
 ### Jellyfin: hardware transcoding
 
 # vainfo profile -> Jellyfin's name for the codec (its Dashboard -> Playback -> Transcoding)
@@ -1232,6 +1253,8 @@ def main(argv=None):
     p = sub.add_parser("jellyfin-setup")
     p.add_argument("config")
     sub.add_parser("jellyfin-login")
+    p = sub.add_parser("jellyfin-key")
+    p.add_argument("app")
     p = sub.add_parser("jellyfin-hwaccel")
     p.add_argument("device")
     p = sub.add_parser("smartd-conf")
@@ -1309,6 +1332,9 @@ def main(argv=None):
                                    args.device, sys.stdin.read()))
         elif args.cmd == "smartd-conf":
             sys.stdout.write(smartd_conf(sys.stdin.read(), args.line))
+        elif args.cmd == "jellyfin-key":
+            print(jellyfin_api_key(os.environ.get("JF_USER", ""), os.environ.get("JF_PASSWORD", ""),
+                                   args.app))
         elif args.cmd == "jellyfin-login":
             try:
                 _, admin = jellyfin_auth(os.environ.get("JF_USER", ""),

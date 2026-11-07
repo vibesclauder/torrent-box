@@ -1823,16 +1823,23 @@ setup_desireerr() {
         run systemctl --user daemon-reload
         changed=1
     fi
-    # Its admin is the login all the apps share and its StashDB key the one in secrets.ini
-    # (both through the environment, never the command line). It follows a changed login;
-    # an admin made on its first visit, or a key changed in its Settings, stay as they are.
+    # Its admin is the login all the apps share, its StashDB key the one in secrets.ini, and
+    # with Jellyfin an API key named Desireerr for its Watch button (all through the
+    # environment, never the command line). It follows a changed login; an admin made on its
+    # first visit, or a key changed in its Settings, stay as they are.
     if (( DRY_RUN )); then
-        info "would set its admin ('${rpc_user:-?}', the shared login) and StashDB key, where not done yet"
+        info "would set its admin ('${rpc_user:-?}', the shared login), StashDB key and Jellyfin key, where not done yet"
     elif [[ -n ${rpc_user:-} || -n $stashdb_key ]]; then
-        local out line
+        local out line jf_key=""
+        if [[ $media_server == jellyfin ]] &&
+                ! jf_key=$(JF_USER=${JELLYFIN_USER:-${rpc_user:-}} JF_PASSWORD=${JELLYFIN_PASSWORD:-${rpc_password:-}} \
+                    helper jellyfin-key Desireerr); then
+            jf_key=""
+            warn "no Jellyfin API key for its Watch button (above); add one in its Settings"
+        fi
         if out=$(DESIREERR_ADMIN_USER=${rpc_user:-} DESIREERR_ADMIN_PASSWORD=${rpc_password:-} \
-                DESIREERR_STASHDB_KEY=$stashdb_key PYTHONDONTWRITEBYTECODE=1 \
-                python3 "$DESIREERR_DIR/desireerr.py" init --data "$DESIREERR_DATA"); then
+                DESIREERR_STASHDB_KEY=$stashdb_key DESIREERR_JELLYFIN_KEY=$jf_key \
+                PYTHONDONTWRITEBYTECODE=1 python3 "$DESIREERR_DIR/desireerr.py" init --data "$DESIREERR_DATA"); then
             while IFS= read -r line; do info "$line"; done <<<"$out"
         else
             warn "couldn't set its admin and StashDB key (see above); its first visit asks instead"

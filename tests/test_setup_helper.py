@@ -948,6 +948,40 @@ class JellyfinSetupTest(unittest.TestCase):
         self.assertIn("already set up", out[0])
 
 
+class JellyfinKeyTest(unittest.TestCase):
+    def fake(self, keys, admin=True):
+        calls = []
+
+        def http_json(method, url, body=None, headers=None, opener=None, timeout=30):
+            calls.append((method, url))
+            if url.endswith("/Users/AuthenticateByName"):
+                return {"AccessToken": "T", "User": {"Policy": {"IsAdministrator": admin}}}
+            if url.endswith("/Auth/Keys") and method == "GET":
+                return {"Items": [{"AppName": a, "AccessToken": t} for a, t in keys.items()]}
+            if "/Auth/Keys?" in url and method == "POST":
+                keys[url.split("app=")[1]] = "NEW"
+                return None
+            raise AssertionError(url)
+        return calls, http_json
+
+    def test_existing_key_is_reused(self):
+        calls, fake = self.fake({"Seerr": "S", "Desireerr": "D"})
+        with mock.patch.object(sh, "http_json", fake):
+            self.assertEqual(sh.jellyfin_api_key("u", "p", "Desireerr"), "D")
+        self.assertNotIn("POST", [m for m, u in calls if "Keys" in u])
+
+    def test_made_when_missing(self):
+        calls, fake = self.fake({"Seerr": "S"})
+        with mock.patch.object(sh, "http_json", fake):
+            self.assertEqual(sh.jellyfin_api_key("u", "p", "Desireerr"), "NEW")
+        self.assertIn(("POST", "http://localhost:8096/Auth/Keys?app=Desireerr"), calls)
+
+    def test_needs_an_admin(self):
+        _, fake = self.fake({}, admin=False)
+        with mock.patch.object(sh, "http_json", fake), self.assertRaises(OSError):
+            sh.jellyfin_api_key("u", "p", "Desireerr")
+
+
 class FakeSeerr:
     def __init__(self, initialized=False):
         self.public = {"initialized": initialized, "mediaServerType": 2 if initialized else 4}
