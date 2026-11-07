@@ -349,9 +349,10 @@ stay in `~/.local/share/torrent-box/arr/whisparr`, Desireerr's checkout and data
 
 Using it (none of this is set up by torrent-box):
 
-- **Scenes come from [StashDB](https://stashdb.org).** Request them in Desireerr. In
-  Whisparr, a StashDB import list (Settings → Import Lists, with the API key from your
-  stashdb.org profile) also brings in the performers and studios you favourite there.
+- **Scenes come from [StashDB](https://stashdb.org).** Request them in Desireerr, or let its
+  saved searches request new ones. Favourites set in Desireerr are only a filter there.
+  Leave Whisparr's StashDB import list (Settings → Import Lists) off: on, it adds every
+  performer and studio you favourite to Whisparr, followed, and downloads their scenes.
 - **Mind the "after" date when following in Whisparr** (Desireerr always sets it to
   today, and older scenes can still be requested one by one). Monitoring a performer or
   studio with no date adds its whole back catalogue, monitored, so all of it is wanted:
