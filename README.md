@@ -328,8 +328,9 @@ A new Transmission password reaches all three apps (their login and download cli
 next setup run: setup keeps a salted hash of the login it gave them in
 `~/.local/share/torrent-box/arr/torrent-box-state.json`, since the apps don't show it back.
 
-**Whisparr and Desireerr** (`[setup] whisparr = yes`, only with `arr = yes`): Whisparr
-`:6969` does Radarr's job for StashDB scenes (v3, hotio's `ghcr.io/hotio/whisparr:v3` image;
+**Whisparr and Desireerr** (`[setup] whisparr = yes`, only with `arr = yes`), for adult
+content (nCore's XXX categories): Whisparr `:6969` does Radarr's job for porn scenes from
+[StashDB](https://stashdb.org) (v3, hotio's `ghcr.io/hotio/whisparr:v3` image;
 there's no linuxserver one), and [Desireerr](https://github.com/vibesclauder/desireerr) `:5056` is
 its Seerr: browse and search StashDB, request scenes, approve other users' requests, follow
 performers and studios. Setup connects Whisparr like Radarr: the login, Transmission (with
