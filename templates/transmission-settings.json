@@ -1,0 +1,22 @@
+{
+    "dht-enabled": false,
+    "download-dir": "@DOWNLOAD_DIR@",
+    "incomplete-dir": "@INCOMPLETE_DIR@",
+    "incomplete-dir-enabled": true,
+    "lpd-enabled": false,
+    "peer-port": 51413,
+    "pex-enabled": false,
+    "port-forwarding-enabled": true,
+    "preallocation": 2,
+    "rpc-authentication-required": true,
+    "rpc-enabled": true,
+    "rpc-host-whitelist": "@HOSTNAME@,@HOSTNAME@.*",
+    "rpc-host-whitelist-enabled": true,
+    "rpc-password": "@RPC_PASSWORD@",
+    "rpc-port": 9091,
+    "rpc-username": "@RPC_USER@",
+    "rpc-whitelist": "127.0.0.1,@RPC_WHITELIST@",
+    "rpc-whitelist-enabled": true,
+    "script-torrent-done-enabled": false,
+    "umask": 2
+}

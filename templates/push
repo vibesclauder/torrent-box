@@ -1,0 +1,8 @@
+#!/bin/sh
+# torrent-box: push TITLE MESSAGE [PRIORITY] [TAGS] -> a push to your ntfy topic, for the
+# root jobs (smartd's disk warnings, the weekly app update). Installed by setup.sh to
+# /usr/local/lib/torrent-box/push, readable by root only since it holds the topic.
+[ $# -ge 2 ] || { echo "usage: push TITLE MESSAGE [PRIORITY] [TAGS]" >&2; exit 2; }
+title=$(printf '%s' "$1" | tr -d '\r\n')
+exec curl -fsS --max-time 30 -o /dev/null -H "Title: $title" -H "Priority: ${3:-high}" \
+    -H "Tags: ${4:-warning}" --data-binary "$2" "@NTFY_URL@"

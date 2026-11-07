@@ -1,0 +1,11 @@
+[Unit]
+Description=Run rss2transmission every 5 minutes
+Documentation=https://github.com/vibesclauder/torrent-box
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target

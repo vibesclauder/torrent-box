@@ -1,0 +1,12 @@
+# Weekly app update (torrent-box-arr-update.service), early on Monday; a box that was off
+# then catches up after it starts.
+[Unit]
+Description=torrent-box: weekly update of the Docker apps
+
+[Timer]
+OnCalendar=Mon *-*-* 04:30:00
+RandomizedDelaySec=30min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

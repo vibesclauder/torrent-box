@@ -1,0 +1,8 @@
+# Jellyfin's apt repository, written by torrent-box setup.sh from templates/jellyfin.sources
+# (what Jellyfin's own install script sets up, with the signing key kept armored).
+Types: deb
+URIs: @URL@
+Suites: @SUITE@
+Components: main
+Architectures: @ARCH@
+Signed-By: @KEY@

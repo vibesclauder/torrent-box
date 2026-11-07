@@ -1,0 +1,11 @@
+# With [setup] whisparr = yes, setup.sh appends this to arr-compose.yml (it continues its
+# services: list and uses its x-arr settings). v3: scenes and whole movies, one folder each.
+# No linuxserver image for it; hotio's takes the same PUID/PGID/UMASK/TZ.
+
+  whisparr:
+    <<: *arr
+    image: ghcr.io/hotio/whisparr:v3
+    container_name: whisparr
+    volumes:
+      - @ARR_DIR@/whisparr:/config
+      - @STORAGE_ROOT@:@STORAGE_ROOT@

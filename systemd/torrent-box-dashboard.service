@@ -1,0 +1,32 @@
+# torrent-box's start page on port 80 (dashboard.py): links to the web apps and their health.
+# System unit, since only root can give a program a port below 1024; it runs as you (it reads
+# your config and the apps' API keys) with that one capability and a read-only view of the
+# system. setup.sh fills in the @...@ values and installs it to /etc/systemd/system/.
+[Unit]
+Description=torrent-box start page
+Documentation=https://github.com/vibesclauder/torrent-box
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=@USER@
+ExecStart=/usr/local/bin/torrent-box-dashboard --port @PORT@ --config @CONFIG@ --arr-dir @ARR_DIR@
+# for 'systemctl --user' (rss2transmission's timer); linger keeps your user manager running
+Environment=XDG_RUNTIME_DIR=/run/user/@UID@
+Restart=on-failure
+RestartSec=10
+
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+LockPersonality=yes
+MemoryMax=200M

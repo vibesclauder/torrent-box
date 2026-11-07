@@ -1,0 +1,24 @@
+# One rss2transmission run; started every few minutes by rss2transmission.timer.
+# User unit: install to ~/.config/systemd/user/ (setup.sh does this).
+[Unit]
+Description=Load new torrents from the nCore RSS feed into Transmission
+Documentation=https://github.com/vibesclauder/torrent-box
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/rss2transmission
+# A run normally takes seconds; never let a hung one block the timer for good.
+TimeoutStartSec=10min
+Nice=10
+
+# Sandboxing: read-only view of the system and home, except what the program writes.
+# setup.sh fills in the watch/archive dirs from config.ini if they differ from these.
+# (These directories must exist.) In user units, systemd only applies the filesystem
+# protections inside a user namespace, hence PrivateUsers=yes; without it they are
+# silently ignored.
+PrivateUsers=yes
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.local/state/rss2transmission %h/torrents %h/old_torrents

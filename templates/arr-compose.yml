@@ -1,0 +1,57 @@
+# torrent-box: Prowlarr, Sonarr, Radarr and Seerr (and Whisparr, from arr-compose-whisparr.yml).
+# Installed by setup.sh; edits here are overwritten on the next run.
+# Host networking: the apps reach Transmission and Jellyfin at localhost, and ufw's rules
+# apply to their ports (ports published by Docker would bypass ufw).
+# The apps run as @PUID@:@PGID@ (you : debian-transmission) with umask 002, and see the
+# storage disk at the same path as Transmission, so imports are hardlinks and no remote
+# path mappings are needed.
+
+x-arr: &arr
+  network_mode: host
+  restart: unless-stopped
+  environment:
+    PUID: "@PUID@"
+    PGID: "@PGID@"
+    UMASK: "002"
+    TZ: "@TZ@"
+
+services:
+  prowlarr:
+    <<: *arr
+    image: lscr.io/linuxserver/prowlarr:latest
+    container_name: prowlarr
+    volumes:
+      - @ARR_DIR@/prowlarr:/config
+
+  sonarr:
+    <<: *arr
+    image: lscr.io/linuxserver/sonarr:latest
+    container_name: sonarr
+    volumes:
+      - @ARR_DIR@/sonarr:/config
+      - @STORAGE_ROOT@:@STORAGE_ROOT@
+
+  radarr:
+    <<: *arr
+    image: lscr.io/linuxserver/radarr:latest
+    container_name: radarr
+    volumes:
+      - @ARR_DIR@/radarr:/config
+      - @STORAGE_ROOT@:@STORAGE_ROOT@
+
+  seerr:
+    image: ghcr.io/seerr-team/seerr:latest
+    container_name: seerr
+    init: true
+    network_mode: host
+    restart: unless-stopped
+    user: "@PUID@:@PGID@"
+    environment:
+      TZ: "@TZ@"
+      PORT: "5055"
+    volumes:
+      - @ARR_DIR@/seerr:/app/config
+    security_opt:
+      - no-new-privileges
+    cap_drop:
+      - ALL

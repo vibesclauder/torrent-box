@@ -1,0 +1,7 @@
+# torrent-box: /etc/apparmor.d/local/transmission-daemon, included by the distribution's
+# transmission profile (Ubuntu ships one in enforce mode). That profile only allows writes
+# under /var/lib/transmission-daemon/downloads, so without this rule every torrent fails
+# with "Permission denied" on the storage disk.
+# setup.sh fills in storage_root from config.ini.
+@STORAGE_ROOT@/ r,
+@STORAGE_ROOT@/** rwk,

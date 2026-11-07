@@ -1,0 +1,13 @@
+# Updates the Docker apps (Prowlarr, Sonarr, Radarr, Seerr, Whisparr) to their newest images;
+# started by torrent-box-arr-update.timer. setup.sh fills in @COMPOSE@ and installs it.
+[Unit]
+Description=torrent-box: update the Docker apps
+Documentation=https://github.com/vibesclauder/torrent-box
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/torrent-box/arr-update @COMPOSE@
+TimeoutStartSec=1h

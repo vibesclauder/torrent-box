@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# torrent-box: update the Docker apps (Prowlarr, Sonarr, Radarr, Seerr, Whisparr) to their newest
+# images. Run weekly by torrent-box-arr-update.timer; pushes which apps were updated, or that it
+# failed.
+# Installed by setup.sh to /usr/local/lib/torrent-box/arr-update.
+# Usage: arr-update COMPOSE_FILE
+set -uo pipefail
+compose_file=$1
+push=${TORRENT_BOX_PUSH:-/usr/local/lib/torrent-box/push}  # (tests use their own)
+
+compose() { docker compose -f "$compose_file" "$@"; }
+notify() { [[ ! -x $push ]] || "$push" "$@" || true; }
+fail() {
+    echo "$1" >&2
+    notify "App update failed" "$1 (journalctl -u torrent-box-arr-update)" high warning
+    exit 1
+}
+images() {  # NAME=IMAGE ID of each app's container (the container is named like the service)
+    local name
+    for name in $services; do
+        printf '%s=%s\n' "$name" "$(docker inspect -f '{{.Image}}' "$name" 2>/dev/null || true)"
+    done
+}
+
+services=$(compose config --services) || fail "can't read $compose_file"
+before=$(images)
+compose pull --quiet || fail "couldn't download the new images"
+compose up -d --remove-orphans || fail "couldn't restart the apps on the new images"
+after=$(images)
+docker image prune -f >/dev/null || true  # the replaced images
+
+updated=$(comm -13 <(sort <<<"$before") <(sort <<<"$after") | cut -d= -f1 | paste -sd ' ')
+if [[ -n $updated ]]; then
+    echo "updated: $updated"
+    notify "Apps updated" "New versions running: $updated" low arrow_up
+else
+    echo "all up to date"
+fi

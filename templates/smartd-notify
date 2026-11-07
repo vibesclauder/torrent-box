@@ -1,0 +1,9 @@
+#!/bin/sh
+# torrent-box: smartd's warning about a disk (smartd.conf: -M exec) as a push. smartd passes
+# the details in SMARTD_* variables. Installed by setup.sh to /usr/local/lib/torrent-box/.
+device=${SMARTD_DEVICEINFO:-${SMARTD_DEVICE:-a disk}}
+message=${SMARTD_FULLMESSAGE:-${SMARTD_MESSAGE:-smartd reported a problem}}
+exec /usr/local/lib/torrent-box/push "Disk problem: $device" \
+    "$message
+
+Details: sudo smartctl -a ${SMARTD_DEVICE:-<disk>}" urgent "warning,floppy_disk"

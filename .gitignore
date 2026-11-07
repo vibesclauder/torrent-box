@@ -1,0 +1,5 @@
+secrets.ini
+*.sqlite
+*.lock
+__pycache__/
+.claude/
