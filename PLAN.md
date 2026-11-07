@@ -16,7 +16,7 @@ after a few quiet days, shellcheck + a clean-VM trial of `setup.sh`.
 | Language | Python 3, standard library only | Already on every Ubuntu box, no build step; HTTP/XML/JSON/sqlite are built in |
 | Process model | systemd **timer** every 5 min; each start = one run | A crash/hang costs one run; `systemctl list-timers` shows health |
 | Download-done notices | Daemon polls Transmission (replaces `torrent_done.sh`) | One config/log/notifier; no `settings.json` hook to manage |
-| Notifications | **ntfy** (ntfy.sh, self-hostable later) | One HTTP POST, phone push, no SMTP/Gmail setup |
+| Notifications | **ntfy** (ntfy.sh, or an own server on the box) | One HTTP POST, phone push, no SMTP/Gmail setup |
 | Config format | INI (`configparser`) | Python 3.10 on this box has no `tomllib` |
 | State | SQLite file | Atomic writes, easy to query by hand |
 | Bundle | GitHub repo `vibesclauder/torrent-box` | Backup lives off the machine it rebuilds |
