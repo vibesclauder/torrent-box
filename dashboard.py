@@ -345,10 +345,29 @@ def check_arr(name, arr_dir):
                                      {"X-Api-Key": key}))
     except (OSError, ValueError) as e:
         return result(DOWN, problem(e))
-    issues = [i.get("message", "?") for i in issues if i.get("type") in ("warning", "error")]
+    issues = [i for i in issues if i.get("type") in ("warning", "error")]
+    elsewhere = [i.get("message", "?") for i in issues if upstream_issue(name, i)]
+    issues = [i.get("message", "?") for i in issues if not upstream_issue(name, i)]
     if not issues:
-        return result(OK, "healthy")
-    return result(WARN, f"{len(issues)} issue{'s' if len(issues) > 1 else ''}", issues)
+        return result(OK, "healthy", [f"not its own problem: {m}" for m in elsewhere])
+    return result(WARN, f"{len(issues)} issue{'s' if len(issues) > 1 else ''}",
+                  issues + [f"not its own problem: {m}" for m in elsewhere])
+
+
+# Health checks of Sonarr, Radarr and Whisparr that report on something else: their
+# indexer is Prowlarr (nCore behind it, which has its own tile and pushes), and an import
+# list is an outside site (StashDB). nCore's request limit alone used to push "Sonarr needs
+# a look" for a minute's backoff. Prowlarr's own indexer issues stay its own.
+UPSTREAM_HEALTH = {"IndexerStatusCheck", "IndexerLongTermStatusCheck", "ImportListStatusCheck"}
+
+
+def upstream_issue(app, issue):
+    if app == "prowlarr":
+        return False
+    source = issue.get("source", "")
+    return source in UPSTREAM_HEALTH or (
+        source in ("IndexerRssCheck", "IndexerSearchCheck")
+        and "temporarily unavailable" in issue.get("message", ""))
 
 
 class LoginError(Exception):
@@ -447,12 +466,30 @@ def check_ncore(arr_dir, last_login=None, now=None):
     return result(OK, "logged in", details, needs_code=False)
 
 
+SEERR_VERSION_TIMEOUT = 1
+seerr_version = None  # the last one /status told us
+
+
 def check_seerr(s):
+    """Up is /status/appdata (local only). /status, which has the version, waits on
+    GitHub's API for its update check: when GitHub hangs, that's no outage of Seerr's."""
+    global seerr_version
     try:
-        status = json.loads(http_get("http://127.0.0.1:5055/api/v1/status"))
+        appdata = json.loads(http_get("http://127.0.0.1:5055/api/v1/status/appdata"))
     except (OSError, ValueError) as e:
         return result(DOWN, problem(e))
-    return result(OK, f"running, version {status.get('version', '?')}")
+    if appdata.get("appDataPermissions") is False:
+        return result(WARN, "can't write its config folder",
+                      [f"{appdata.get('appDataPath', '/app/config')} in the container"])
+    try:
+        status = json.loads(http_get("http://127.0.0.1:5055/api/v1/status",
+                                     timeout=SEERR_VERSION_TIMEOUT))
+    except (OSError, ValueError):
+        return result(OK, f"running, version {seerr_version or '?'}",
+                      ["its update check isn't getting an answer from GitHub; "
+                       "requests and everything else work"])
+    seerr_version = status.get("version", "?")
+    return result(OK, f"running, version {seerr_version}")
 
 
 def check_desireerr(s):

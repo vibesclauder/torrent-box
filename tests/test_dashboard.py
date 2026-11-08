@@ -410,6 +410,30 @@ class ChecksTest(unittest.TestCase):
             self.assertEqual(db.check_arr("prowlarr", self.tmp)["state"], db.DOWN)
             arr.close = lambda: None
 
+    def test_arr_issues_from_upstream_dont_warn(self):
+        rate_limited = {"source": "IndexerStatusCheck", "type": "warning",
+                        "message": "Indexers unavailable due to failures: nCore (Prowlarr)"}
+        no_search = {"source": "IndexerSearchCheck", "type": "warning",
+                     "message": "All search-capable indexers are temporarily unavailable "
+                                "due to recent indexer errors"}
+        root = {"source": "RootFolderCheck", "type": "error", "message": "Missing root folder"}
+        arr = FakeArr([rate_limited, no_search])
+        self.addCleanup(arr.close)
+        for app in ("sonarr", "prowlarr"):
+            (self.tmp / app).mkdir()
+            (self.tmp / app / "config.xml").write_text("<Config><ApiKey>KEY</ApiKey></Config>")
+        with mock.patch.dict(db.ARR_APPS, {"sonarr": (arr.port, "v3"), "prowlarr": (arr.port, "v1")}):
+            c = db.check_arr("sonarr", self.tmp)
+            self.assertEqual((c["state"], c["summary"]), (db.OK, "healthy"))
+            self.assertEqual(len(c["details"]), 2)
+            self.assertTrue(c["details"][0].startswith("not its own problem: Indexers"))
+            # its indexers are Prowlarr's own business
+            self.assertEqual(db.check_arr("prowlarr", self.tmp)["state"], db.WARN)
+            arr.issues = [rate_limited, root]
+            c = db.check_arr("sonarr", self.tmp)
+            self.assertEqual((c["state"], c["summary"]), (db.WARN, "1 issue"))
+            self.assertEqual(c["details"][0], "Missing root folder")
+
     def test_rss2transmission(self):
         now = 1_800_000_000
         units = {"rss2transmission.timer": {"ActiveState": "active"},
@@ -561,6 +585,33 @@ class PageTest(unittest.TestCase):
             self.assertEqual((r["state"], r["summary"]), (state, summary))
         with mock.patch.object(db, "http_get", side_effect=ConnectionRefusedError(111, "refused")):
             self.assertEqual(db.check_desireerr({})["state"], db.DOWN)
+
+    def test_seerr_check(self):
+        appdata = b'{"appData": true, "appDataPath": "/app/config", "appDataPermissions": true}'
+        def seerr(github_hangs=False, writable=True):
+            def get(url, timeout=db.TIMEOUT):
+                if url.endswith("/appdata"):
+                    return appdata if writable else appdata.replace(b"s\": true", b"s\": false")
+                if github_hangs:  # /status waits on GitHub for its update check
+                    raise urllib.error.URLError(TimeoutError("timed out"))
+                return b'{"version": "3.5.1"}'
+            return get
+        with mock.patch.object(db, "seerr_version", None):
+            with mock.patch.object(db, "http_get", seerr(github_hangs=True)):
+                r = db.check_seerr({})
+            self.assertEqual((r["state"], r["summary"]), (db.OK, "running, version ?"))
+            self.assertIn("GitHub", r["details"][0])
+            with mock.patch.object(db, "http_get", seerr()):
+                r = db.check_seerr({})
+            self.assertEqual((r["state"], r["summary"], r["details"]),
+                             (db.OK, "running, version 3.5.1", []))
+            with mock.patch.object(db, "http_get", seerr(github_hangs=True)):
+                self.assertEqual(db.check_seerr({})["summary"], "running, version 3.5.1")
+            with mock.patch.object(db, "http_get", seerr(writable=False)):
+                self.assertEqual(db.check_seerr({})["state"], db.WARN)
+        with mock.patch.object(db, "http_get", side_effect=urllib.error.URLError(TimeoutError())):
+            r = db.check_seerr({})
+        self.assertEqual((r["state"], r["summary"]), (db.DOWN, "not responding"))
 
     def test_a_failing_check_is_reported_not_raised(self):
         s = {**db.load_settings(Path("/nonexistent")), "media_server": "none"}
