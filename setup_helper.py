@@ -10,6 +10,7 @@ Used by setup.sh only; each subcommand does one small job:
   jellyfin-login          does JF_USER / JF_PASSWORD work as a Jellyfin admin?
   jellyfin-hwaccel DEV    switch on hardware transcoding (vainfo's output on stdin), if off
   jellyfin-key APP        Jellyfin's API key for APP (made if missing), for setup.sh to capture
+  jellyfin-xxx-library    Whisparr's root folders (--root, repeated) as a Home videos library
   smartd-conf LINE        /etc/smartd.conf on stdin, with our storage disk line, to stdout
   seerr-setup             Seerr's first-run setup: Jellyfin sign-in, libraries, Sonarr, Radarr
   ncore-code              enter a fresh nCore 2FA code in Prowlarr (when its session expired)
@@ -868,6 +869,46 @@ def jellyfin_api_key(user, password, app, base=JELLYFIN):
     return key
 
 
+def jellyfin_xxx_library(user, password, roots, name="XXX", base=JELLYFIN):
+    """Whisparr's root folders as a Jellyfin library of the type "Home videos and photos":
+    its videos are Videos, not Movies, so neither Jellyfin Enhanced's random button nor
+    Seerr offers them. Without photos: a scene's own picture is its cover (folder.jpg,
+    Desireerr's). A library that already has one of the folders is left as it is (missing
+    folders are added to it). Yields report lines; "warning: ..." for the caller to show."""
+    token, admin = jellyfin_auth(user, password, base)
+    if not admin:
+        raise OSError(f"{user} is not a Jellyfin admin")
+    auth = {"Authorization": f'{JF_CLIENT}, Token="{token}"'}
+    roots = [r.rstrip("/") for r in roots]
+    folders = http_json("GET", f"{base}/Library/VirtualFolders", headers=auth) or []
+    for f in folders:
+        have = [loc.rstrip("/") for loc in f.get("Locations") or []]
+        if not set(roots) & set(have):
+            continue
+        for root in roots:
+            if root not in have:
+                http_json("POST", f"{base}/Library/VirtualFolders/Paths?refreshLibrary=true",
+                          {"Name": f["Name"], "PathInfo": {"Path": root}}, headers=auth)
+                yield f"library {f['Name']}: added {root}"
+        kind = f.get("CollectionType") or "mixed"
+        if kind == "homevideos":
+            yield f"library {f['Name']} (Home videos and photos): {', '.join(roots)}"
+        else:
+            yield (f"warning: library {f['Name']} has Whisparr's folders as {kind}: its videos can "
+                   "come up in the random button; make it Home videos and photos (remove it, "
+                   "add it again with that type)")
+        return
+    taken = {f["Name"] for f in folders}
+    while name in taken:  # a duplicate name would silently become "XXX2"
+        name += " (Whisparr)"
+    query = urllib.parse.urlencode({"name": name, "collectionType": "homevideos",
+                                    "paths": ",".join(roots), "refreshLibrary": "true"})
+    http_json("POST", f"{base}/Library/VirtualFolders?{query}",
+              {"LibraryOptions": {"EnableRealtimeMonitor": True, "EnablePhotos": False}},
+              headers=auth)
+    yield f"library {name} (Home videos and photos): {', '.join(roots)}"
+
+
 ### Jellyfin: hardware transcoding
 
 # vainfo profile -> Jellyfin's name for the codec (its Dashboard -> Playback -> Transcoding)
@@ -1255,6 +1296,8 @@ def main(argv=None):
     sub.add_parser("jellyfin-login")
     p = sub.add_parser("jellyfin-key")
     p.add_argument("app")
+    p = sub.add_parser("jellyfin-xxx-library")
+    p.add_argument("--root", action="append", required=True)
     p = sub.add_parser("jellyfin-hwaccel")
     p.add_argument("device")
     p = sub.add_parser("smartd-conf")
@@ -1323,6 +1366,10 @@ def main(argv=None):
             print(net, whitelist_pattern(net), src or "")
         elif args.cmd == "merge-settings":
             cmd_merge_settings(args)
+        elif args.cmd == "jellyfin-xxx-library":
+            for line in jellyfin_xxx_library(os.environ.get("JF_USER", ""),
+                                             os.environ.get("JF_PASSWORD", ""), args.root):
+                print(line)
         elif args.cmd == "jellyfin-setup":
             for line in jellyfin_setup(args.config, os.environ.get("JF_USER", ""),
                                        os.environ.get("JF_PASSWORD", "")):

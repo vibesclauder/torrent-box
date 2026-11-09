@@ -353,7 +353,7 @@ topic (it reads it from the config). Both get a tile on the start page. Set to `
 Whisparr's container and its Prowlarr application and stops Desireerr; Whisparr's settings
 stay in `~/.local/share/torrent-box/arr/whisparr`, Desireerr's checkout and data stay too.
 
-Using it (none of this is set up by torrent-box):
+Using it (setup does only the Jellyfin library; the rest is up to you):
 
 - **Scenes come from [StashDB](https://stashdb.org).** Request them in Desireerr, or let its
   saved searches request new ones. Favourites set in Desireerr are only a filter there.
@@ -376,14 +376,17 @@ Using it (none of this is set up by torrent-box):
   Movie" rejections are just the other results nCore returned).
 - **Files:** new downloads are filed as
   `<root folder>/scenes/<Studio>/<Series>/<date> - <title>`.
-- **In Jellyfin:** a *Movies* library with Whisparr's root folders, with the TheMovieDb and
-  Open Movie Database downloaders and image fetchers unticked (they'd match scene folders to
-  real films). The details come from StashDB through the `.nfo` file Desireerr writes beside
-  each scene (the performers as the cast, with their photos); the pictures from Whisparr
-  (Settings → Metadata → Kodi (XBMC) / Emby, whose own `.nfo` Desireerr turns off). Setup lets
-  Desireerr write on the storage disk for this (a drop-in,
-  `~/.config/systemd/user/desireerr.service.d/torrent-box.conf`). To keep it private, untick
-  the library in each other user's access (Users → Access) and leave it out of Seerr.
+- **In Jellyfin:** setup adds Whisparr's folders as the library **XXX**, of the type *Home
+  videos and photos* (unless a library has them already; it warns if that one is another
+  type). Its videos are Jellyfin "Videos", not Movies, so the random button (Jellyfin
+  Enhanced) never picks them and Seerr doesn't list them; a *Movies* library would put them
+  in the random pool. The details come from StashDB through the `.nfo` file Desireerr writes
+  beside each scene (the performers as the cast, with their photos), and the cover is the
+  scene's `folder.jpg` (also Desireerr's): Whisparr's own metadata (Settings → Metadata →
+  Kodi (XBMC) / Emby) is off, as its `screenshot.jpg` would show up as a photo of its own in
+  each scene's folder. Setup lets Desireerr write on the storage disk for this (a drop-in,
+  `~/.config/systemd/user/desireerr.service.d/torrent-box.conf`). To keep the library
+  private, untick it in each other user's access (Users → Access).
 
 **On the TV (LG):** Seerr has no TV app; request from the phone (open Seerr, "Add to home
 screen") and watch in Jellyfin as usual. To search and request on the TV itself, two things to

@@ -982,6 +982,57 @@ class JellyfinKeyTest(unittest.TestCase):
             sh.jellyfin_api_key("u", "p", "Desireerr")
 
 
+class JellyfinXxxLibraryTest(unittest.TestCase):
+    ROOTS = ["/mnt/storage/XXX/HD", "/mnt/storage/XXX/SD/"]
+
+    def run_with(self, folders, admin=True):
+        calls = []
+
+        def http_json(method, url, body=None, headers=None, opener=None, timeout=30):
+            calls.append((method, url, body))
+            if url.endswith("/Users/AuthenticateByName"):
+                return {"AccessToken": "T", "User": {"Policy": {"IsAdministrator": admin}}}
+            if url.endswith("/Library/VirtualFolders") and method == "GET":
+                return folders
+            if method == "POST":
+                return None
+            raise AssertionError(url)
+        with mock.patch.object(sh, "http_json", http_json):
+            out = list(sh.jellyfin_xxx_library("u", "p", self.ROOTS))
+        return out, [(m, u, b) for m, u, b in calls if m == "POST" and "Authenticate" not in u]
+
+    def test_made_as_home_videos(self):
+        out, posts = self.run_with([{"Name": "Movies", "CollectionType": "movies", "Locations": ["/m"]}])
+        (method, url, body), = posts
+        q = urllib.parse.parse_qs(urllib.parse.urlsplit(url).query)
+        self.assertEqual((q["name"], q["collectionType"]), (["XXX"], ["homevideos"]))
+        self.assertEqual(q["paths"], ["/mnt/storage/XXX/HD,/mnt/storage/XXX/SD"])
+        self.assertEqual(body["LibraryOptions"], {"EnableRealtimeMonitor": True, "EnablePhotos": False})
+        self.assertIn("Home videos and photos", out[0])
+
+    def test_name_taken_by_another(self):
+        _, posts = self.run_with([{"Name": "XXX", "CollectionType": "homevideos", "Locations": ["/x"]}])
+        q = urllib.parse.parse_qs(urllib.parse.urlsplit(posts[0][1]).query)
+        self.assertEqual(q["name"], ["XXX (Whisparr)"])
+
+    def test_existing_library_kept_and_completed(self):
+        out, posts = self.run_with([{"Name": "Adult", "CollectionType": "homevideos",
+                                     "Locations": ["/mnt/storage/XXX/HD"]}])
+        self.assertEqual(posts, [("POST", "http://localhost:8096/Library/VirtualFolders/Paths?refreshLibrary=true",
+                                  {"Name": "Adult", "PathInfo": {"Path": "/mnt/storage/XXX/SD"}})])
+        self.assertTrue(out[-1].startswith("library Adult (Home videos"))
+
+    def test_movies_library_gets_a_warning(self):
+        out, posts = self.run_with([{"Name": "XXX", "CollectionType": "movies",
+                                     "Locations": ["/mnt/storage/XXX/HD", "/mnt/storage/XXX/SD"]}])
+        self.assertEqual(posts, [])
+        self.assertTrue(out[-1].startswith("warning: library XXX has Whisparr's folders as movies"))
+
+    def test_needs_an_admin(self):
+        with self.assertRaises(OSError):
+            self.run_with([], admin=False)
+
+
 class FakeSeerr:
     def __init__(self, initialized=False):
         self.public = {"initialized": initialized, "mediaServerType": 2 if initialized else 4}

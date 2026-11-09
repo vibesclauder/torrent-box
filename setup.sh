@@ -1911,6 +1911,34 @@ setup_desireerr() {
     fi
 }
 
+# Whisparr's folders as a Jellyfin library of the type "Home videos and photos": its videos
+# aren't Movies, so neither the random button (Jellyfin Enhanced) nor Seerr offers them, and
+# a scene's own picture is its cover (Desireerr's folder.jpg). A library that has them already
+# stays (setup warns if it's another type). Hide it from other users in Jellyfin (README).
+setup_xxx_library() {
+    desireerr_on && [[ $media_server == jellyfin ]] || return 0
+    step "Jellyfin library for Whisparr"
+    local code dir out line roots=() jf_user=${JELLYFIN_USER:-${rpc_user:-}} jf_password=${JELLYFIN_PASSWORD:-${rpc_password:-}}
+    for code in xxx_hd xxx_xvid xxx_dvd; do
+        dir=$(route_dir "$code"); [[ -z $dir ]] || roots+=(--root "$dir")
+    done
+    if (( ${#roots[@]} == 0 )); then
+        info "no XXX folders in [routes]; nothing to add"
+        return
+    fi
+    if (( DRY_RUN )); then
+        info "would add $(printf '%s\n' "${roots[@]}" | grep -v '^--' | paste -sd ' ') as library XXX (Home videos and photos), unless a library has them"
+        return
+    fi
+    if ! out=$(JF_USER=$jf_user JF_PASSWORD=$jf_password helper jellyfin-xxx-library "${roots[@]}"); then
+        warn "couldn't add Whisparr's folders to Jellyfin (above); add them as a Home videos and photos library"
+        return
+    fi
+    while IFS= read -r line; do
+        if [[ $line == warning:* ]]; then warn "${line#warning: }"; else info "$line"; fi
+    done <<<"$out"
+}
+
 setup_dashboard() {
     step "Start page (http://$(hostname)/)"
     local changed=0
@@ -2154,6 +2182,7 @@ main() {
     setup_arr_updates
     setup_rss2transmission
     setup_desireerr
+    setup_xxx_library
     setup_dashboard
     setup_firewall
     finish
