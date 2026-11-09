@@ -298,6 +298,13 @@ class NtfyCheckTest(unittest.TestCase):
         w = db.Watcher(delay=0)  # a push about it would have to go through it
         self.assertEqual(w.update({"ntfy": db.result(db.DOWN, "stopped")}, 0), [])
 
+    def test_version_in_the_footer(self):
+        status = {"time": 0, "hostname": "box", "storage_root": "/mnt/storage", "checks": {}}
+        self.assertIn("<span>torrent-box · <a", db.render(status, "box"))  # not installed
+        with mock.patch.object(db, "VERSION", "1.0 rev 2, 2026-11-09 13:31"):
+            self.assertIn("<span>torrent-box 1.0 rev 2, 2026-11-09 13:31 · <a",
+                          db.render(status, "box"))
+
 
 class WatcherTest(unittest.TestCase):
     def test_alerts_after_a_while_once_and_when_back(self):

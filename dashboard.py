@@ -35,6 +35,7 @@ from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+VERSION = ""  # "1.0 rev 2, 2026-11-09 13:31": setup.sh writes it in when installing
 DEFAULT_CONFIG = Path("~/.config/rss2transmission/config.ini").expanduser()
 DEFAULT_ARR_DIR = Path("~/.local/share/torrent-box/arr").expanduser()
 CACHE_SECONDS = 5
@@ -1085,7 +1086,7 @@ def render(status, host):
 <h2>Health</h2>
 <div class="rows">{"".join(rows)}</div>
 <footer><span id="updated">Updated {updated}, refreshes every {REFRESH_SECONDS} s.</span>
-<span>torrent-box · <a href="https://github.com/vibesclauder/torrent-box">GitHub</a></span></footer>
+<span>torrent-box{" " + e(VERSION) if VERSION else ""} · <a href="https://github.com/vibesclauder/torrent-box">GitHub</a></span></footer>
 </main>
 </div><script>{SCRIPT}</script></body></html>
 """

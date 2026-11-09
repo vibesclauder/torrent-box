@@ -111,8 +111,31 @@ banner() {
 | __/ _ \| '__| '__/ _ \ '_ \| __|____| '_ \ / _ \ \/ /
 | || (_) | |  | | |  __/ | | | ||_____| |_) | (_) >  <
  \__\___/|_|  |_|  \___|_| |_|\__|    |_.__/ \___/_/\_\
-
 EOF
+    printf '%55s\n\n' "$TB_VERSION"
+}
+
+# "1.0 rev 2, 2026-11-09 13:31": VERSION's number, one revision more for each commit since
+# the one that last changed VERSION, and when the checked-out commit was made. Without git
+# history (a downloaded archive) just what VERSION says.
+repo_version() {
+    local v base n
+    v=$(<"$REPO/VERSION")
+    git -C "$REPO" rev-parse -q --verify HEAD >/dev/null 2>&1 || { printf '%s' "$v"; return; }
+    base=$(git -C "$REPO" log -1 --format=%H -- VERSION 2>/dev/null || true)
+    if [[ -n $base && $v =~ ^(.*rev\ )([0-9]+)$ ]]; then
+        n=$(git -C "$REPO" rev-list --count "$base..HEAD" 2>/dev/null || echo 0)
+        v=${BASH_REMATCH[1]}$((BASH_REMATCH[2] + n))
+    fi
+    printf '%s, %s' "$v" "$(git -C "$REPO" log -1 --format=%cd --date=format-local:'%Y-%m-%d %H:%M')"
+}
+
+# A copy of the program SRC with the version written into its VERSION = "" line, to install.
+stamped() {
+    local out
+    out=$TMP/$(basename "$1")
+    sed "s|^VERSION = \"\".*|VERSION = \"$TB_VERSION\"|" "$1" >"$out"
+    printf '%s' "$out"
 }
 
 step() { printf '\n== %s\n' "$*"; }
@@ -1777,7 +1800,7 @@ setup_arr_updates() {
 setup_rss2transmission() {
     step "rss2transmission"
     local changed=0 d dirs
-    update_file "$REPO/rss2transmission.py" "$BIN" 755 || true
+    update_file "$(stamped "$REPO/rss2transmission.py")" "$BIN" 755 || true
 
     helper service-unit "$REPO/systemd/rss2transmission.service" "$config_src" \
         >"$TMP/rss2transmission.service"
@@ -1942,7 +1965,7 @@ setup_xxx_library() {
 setup_dashboard() {
     step "Start page (http://$(hostname)/)"
     local changed=0
-    if update_file "$REPO/dashboard.py" "$DASHBOARD_BIN" 755 root; then changed=1; fi
+    if update_file "$(stamped "$REPO/dashboard.py")" "$DASHBOARD_BIN" 755 root; then changed=1; fi
     helper render --strip-comments "$REPO/systemd/torrent-box-dashboard.service" "USER=$USER" \
         "UID=$(id -u)" "PORT=$DASHBOARD_PORT" "CONFIG=$CONFIG" "ARR_DIR=$ARR_DIR" \
         >"$TMP/torrent-box-dashboard.service"
@@ -2147,6 +2170,7 @@ main() {
 
     TMP=$(mktemp -d -t torrent-box-setup.XXXXXX)
     trap 'rm -rf "$TMP"' EXIT
+    TB_VERSION=$(repo_version)
     banner
     if (( DRY_RUN )); then
         echo "Dry run: showing what would be done; nothing is changed."

@@ -80,6 +80,12 @@ system files are only rewritten (and services only restarted) when something cha
 `FEED_URL`, `RPC_USER`, `RPC_PASSWORD`, `LAN_SUBNET`). `--shadow` also installs
 `systemd/shadow.conf` (dry runs only, for a trial next to an old setup).
 
+**Version:** like `1.0 rev 5, 2026-11-10 09:12`: the number in `VERSION`, one revision more
+for every commit after the one that last changed `VERSION`, and when the checked-out commit
+was made (without git history, as in a downloaded archive, just `VERSION`). setup.sh shows
+it under its banner and writes it into what it installs, so the start page's footer and the
+test push say which one is running. Updating: `git pull && ./setup.sh`.
+
 ## Start page
 
 `http://<box>/` (port 80, so the box's name is enough) links to the web apps that are set up
