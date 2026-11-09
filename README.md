@@ -378,9 +378,12 @@ Using it (none of this is set up by torrent-box):
   `<root folder>/scenes/<Studio>/<Series>/<date> - <title>`.
 - **In Jellyfin:** a *Movies* library with Whisparr's root folders, with the TheMovieDb and
   Open Movie Database downloaders and image fetchers unticked (they'd match scene folders to
-  real films). Titles, performers and posters come from Whisparr: Settings → Metadata →
-  Kodi (XBMC) / Emby, with "Use Movie.nfo". To keep it private, untick the library in each
-  other user's access (Users → Access) and leave it out of Seerr.
+  real films). The details come from StashDB through the `.nfo` file Desireerr writes beside
+  each scene (the performers as the cast, with their photos); the pictures from Whisparr
+  (Settings → Metadata → Kodi (XBMC) / Emby, whose own `.nfo` Desireerr turns off). Setup lets
+  Desireerr write on the storage disk for this (a drop-in,
+  `~/.config/systemd/user/desireerr.service.d/torrent-box.conf`). To keep it private, untick
+  the library in each other user's access (Users → Access) and leave it out of Seerr.
 
 **On the TV (LG):** Seerr has no TV app; request from the phone (open Seerr, "Add to home
 screen") and watch in Jellyfin as usual. To search and request on the TV itself, two things to

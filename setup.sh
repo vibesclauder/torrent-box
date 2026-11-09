@@ -1832,7 +1832,7 @@ setup_desireerr() {
         if [[ -f $unit ]]; then
             step "Desireerr"
             run systemctl --user disable --now desireerr.service
-            run rm -f "$unit"
+            run rm -f "$unit" "$USER_UNITS/desireerr.service.d/torrent-box.conf"
             run systemctl --user daemon-reload
             info "stopped; $DESIREERR_DIR and its data ($DESIREERR_DATA) are kept"
         fi
@@ -1868,9 +1868,16 @@ setup_desireerr() {
         return
     fi
     if update_file "$DESIREERR_DIR/systemd/desireerr.service" "$unit" 644; then
-        run systemctl --user daemon-reload
         changed=1
     fi
+    # It writes the scenes' .nfo files for Jellyfin beside them: the storage disk is writable
+    # in its sandbox (the rest stays read-only).
+    printf '%s\n' "# torrent-box: Desireerr writes the scenes' .nfo files (setup.sh writes this)" \
+        "[Service]" "ReadWritePaths=-$storage_root" >"$TMP/desireerr-storage.conf"
+    if update_file "$TMP/desireerr-storage.conf" "$USER_UNITS/desireerr.service.d/torrent-box.conf" 644; then
+        changed=1
+    fi
+    if (( changed )); then run systemctl --user daemon-reload; fi
     # Its admin is the login all the apps share, its StashDB key the one in secrets.ini, and
     # with Jellyfin an API key named Desireerr for its Watch button (all through the
     # environment, never the command line). It follows a changed login; an admin made on its
