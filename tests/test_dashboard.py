@@ -284,6 +284,17 @@ class NtfyCheckTest(unittest.TestCase):
     def test_service_down_and_never_pushed(self):
         with mock.patch.object(db, "service_check", lambda unit: (db.DOWN, "stopped")):
             self.assertEqual(db.check_ntfy(self.S)["state"], db.DOWN)
+
+    def test_link_to_the_server(self):
+        cases = [("http://localhost:2586", "box.lan", "http://box.lan:2586"),
+                 ("http://127.0.0.1:2586", "[fd7a::1]", "http://[fd7a::1]:2586"),
+                 ("https://ntfy.example", "box.lan", "https://ntfy.example")]
+        for server, host, url in cases:
+            self.assertEqual(db.ntfy_link(server, host), url)
+        status = {"time": 0, "hostname": "box", "storage_root": "/mnt/storage", "checks": {
+            "ntfy": db.result(db.OK, "own server, running", server="http://localhost:2586")}}
+        self.assertIn('<a href="http://box.lan:2586/">http://box.lan:2586</a>',
+                      db.render(status, "box.lan"))
         w = db.Watcher(delay=0)  # a push about it would have to go through it
         self.assertEqual(w.update({"ntfy": db.result(db.DOWN, "stopped")}, 0), [])
 

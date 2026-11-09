@@ -233,7 +233,9 @@ All pushes (rss2transmission, the start page, the disk, Prowlarr, Seerr, the wee
 update) go through [ntfy](https://ntfy.sh). On the public ntfy.sh the topic is the only
 password, and the operator can read every push: torrent names, requests, nCore problems.
 With `[setup] own_ntfy = yes` (asked once, default yes with Tailscale) setup runs ntfy on the
-box instead, from the distro's own `ntfy` package:
+box instead, from ntfy's own apt repository (archive.ntfy.sh, the key checked against the
+fingerprint in ntfy's docs, and pinned over the distro's `ntfy`, which is built without the
+web app):
 
 - it listens on port **2586** (80 is the start page's); if ufw is active, only the LAN and the
   tailnet get in. Everything on the box pushes to `http://localhost:2586` (`[ntfy] server` in
@@ -242,6 +244,9 @@ box instead, from the distro's own `ntfy` package:
   (ntfy reads `NTFY_*` variables), so the package's `/etc/ntfy/server.yml` stays untouched;
 - messages are kept for **3 days**: a phone that was off the tailnet gets what it missed when
   it's back.
+- its **web app** is at `http://<box>:2586/` (the start page's Notifications row links it):
+  subscribe to the topic there to read the pushes in a browser, or get them as desktop
+  notifications while the tab is open.
 
 In the ntfy app (Android): **+ → Use another server**, `http://<box>.<tailnet>.ts.net:2586`
 (the summary at the end of setup prints it), the same topic as before. Keep Tailscale on on

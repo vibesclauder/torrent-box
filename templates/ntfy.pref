@@ -1,0 +1,5 @@
+# torrent-box: ntfy from ntfy's own repository (its build has the web app), even when the
+# distro has a newer version number. Written by setup.sh from templates/ntfy.pref.
+Package: ntfy
+Pin: origin archive.ntfy.sh
+Pin-Priority: 600

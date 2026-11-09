@@ -318,13 +318,25 @@ def check_samba(s):
 def check_ntfy(s):
     """Our own ntfy server ([setup] own_ntfy = yes): the service and its health endpoint."""
     state, summary = service_check("ntfy")
+    server = s["ntfy_server"]
     if state != OK:
-        return result(state, summary)
+        return result(state, summary, server=server)
     try:
-        healthy = json.loads(http_get(f"{s['ntfy_server']}/v1/health")).get("healthy")
+        healthy = json.loads(http_get(f"{server}/v1/health")).get("healthy")
     except (OSError, ValueError) as e:
-        return result(WARN, f"running, but {problem(e) if isinstance(e, OSError) else 'no health'}")
-    return result(OK if healthy else WARN, "own server, running" if healthy else "unhealthy")
+        return result(WARN, f"running, but {problem(e) if isinstance(e, OSError) else 'no health'}",
+                      server=server)
+    return result(OK if healthy else WARN, "own server, running" if healthy else "unhealthy",
+                  server=server)
+
+
+def ntfy_link(server, host):
+    """The ntfy server's address as the browser can reach it: "localhost" in the config is
+    this box, which the viewer knows as host."""
+    parts = urllib.parse.urlsplit(server)
+    if parts.hostname not in ("localhost", "127.0.0.1", "::1"):
+        return server
+    return parts._replace(netloc=f"{host}:{parts.port}" if parts.port else host).geturl()
 
 
 def api_key(config_xml):
@@ -1029,6 +1041,10 @@ def render(status, host):
             extra = (f'<div class="muted"><code>\\\\{e(host)}\\storage</code> (Windows), '
                      f'<a href="smb://{e(host)}/storage">smb://{e(host)}/storage</a> '
                      f'(Mac, Linux, phones)</div>')
+        elif cid == "ntfy" and c.get("server"):
+            url = e(ntfy_link(c["server"], host))
+            extra = (f'<div class="muted"><a href="{url}/">{url}</a> '
+                     f'(web app; also the server for the ntfy phone app)</div>')
         elif cid == "ncore":
             # only while a code is needed (setup_helper.py ncore-code works any time)
             if c.get("needs_code"):

@@ -1,0 +1,8 @@
+# ntfy's own apt repository, written by torrent-box setup.sh from templates/ntfy.sources
+# (as ntfy's docs set it up). The distro's ntfy is built without the web app; this one has it.
+Types: deb
+URIs: @URL@
+Suites: stable
+Components: main
+Architectures: @ARCH@
+Signed-By: @KEY@

@@ -48,6 +48,11 @@ NTFY_PUBLIC=https://ntfy.sh
 NTFY_PORT=2586  # our own ntfy server ([setup] own_ntfy = yes); 80 is the start page's
 NTFY_LOCAL=http://localhost:$NTFY_PORT  # what everything on the box pushes to (the apps too: host networking)
 NTFY_DROPIN=/etc/systemd/system/ntfy.service.d/torrent-box.conf
+NTFY_REPO=https://archive.ntfy.sh/apt  # ntfy's own packages: the distro's have no web app
+NTFY_KEY=/etc/apt/keyrings/ntfy.gpg
+NTFY_KEY_FP=55BA774A6F5EE67431E4B6B7CFDB962D4F1EC4AF  # as ntfy's install docs give it
+NTFY_SOURCES=/etc/apt/sources.list.d/ntfy.sources
+NTFY_PIN=/etc/apt/preferences.d/ntfy
 SMARTD_CONF=/etc/smartd.conf
 JF_VAINFO=/usr/lib/jellyfin-ffmpeg/vainfo  # comes with jellyfin-ffmpeg, with its VAAPI drivers
 USER=${USER:-$(id -un)}
@@ -1498,8 +1503,21 @@ setup_ntfy() {
         changed=1
         as_root systemctl daemon-reload
     fi
+    ntfy_repo
     apt_install ntfy ||
-        die "couldn't install ntfy (Ubuntu has it in universe, Debian from 13); set [setup] own_ntfy = no in $CONFIG to use ntfy.sh"
+        die "couldn't install ntfy; set [setup] own_ntfy = no in $CONFIG to use ntfy.sh"
+    # Installed before from the distro: apt prefers ntfy's own now (the pin), so switch to it.
+    local have want
+    have=$(dpkg-query -W -f='${Version}' ntfy 2>/dev/null || true)
+    want=$(LC_ALL=C apt-cache policy ntfy 2>/dev/null | awk '/Candidate:/ { print $2 }')
+    if [[ -n $have && -n $want && $want != "(none)" && $want != "$have" ]]; then
+        info "ntfy $have -> $want (ntfy's own package, with the web app)"
+        as_root env DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold ntfy
+        # The distro's ran as _ntfy, ntfy's own runs as ntfy: the message cache comes along.
+        if id -u ntfy >/dev/null 2>&1; then as_root chown -R ntfy:ntfy /var/cache/ntfy; fi
+        changed=1
+    fi
     systemctl is-enabled -q ntfy 2>/dev/null || as_root systemctl enable ntfy
     if ! systemctl is-active -q ntfy 2>/dev/null; then
         as_root systemctl start ntfy
@@ -1514,6 +1532,36 @@ setup_ntfy() {
     curl -fsS --max-time 5 -o /dev/null "$NTFY_LOCAL/v1/health" ||
         die "the ntfy server doesn't answer on port $NTFY_PORT. Check: sudo journalctl -u ntfy"
     info "running on port $NTFY_PORT (ufw: the LAN and the tailnet only)"
+}
+
+# ntfy's own apt repo, as its docs set it up, with the key checked against the fingerprint
+# they give. Where it has no packages, the distro's ntfy stays (without the web app).
+ntfy_repo() {
+    local arch changed=0 fp
+    arch=$(dpkg --print-architecture)
+    case $arch in
+        amd64|arm64|armhf) ;;
+        *) warn "ntfy has no packages of its own for $arch: the distro's, without the web app"
+           return ;;
+    esac
+    apt_install gpg
+    if curl -fsSL --max-time 30 "$NTFY_REPO/keyring.gpg" -o "$TMP/ntfy.gpg"; then
+        fp=$(gpg --show-keys --with-colons "$TMP/ntfy.gpg" 2>/dev/null | awk -F: '$1 == "fpr" { print $10; exit }')
+        [[ $fp == "$NTFY_KEY_FP" ]] ||
+            die "ntfy's signing key from $NTFY_REPO has fingerprint ${fp:-?}, not $NTFY_KEY_FP as its docs say"
+        if update_file "$TMP/ntfy.gpg" "$NTFY_KEY" 644 root; then changed=1; fi
+    elif [[ ! -f $NTFY_KEY ]]; then
+        warn "could not download ntfy's signing key from $NTFY_REPO: the distro's ntfy, without the web app"
+        return
+    fi
+    helper render "$REPO/templates/ntfy.sources" "URL=$NTFY_REPO" "ARCH=$arch" "KEY=$NTFY_KEY" \
+        >"$TMP/ntfy.sources"
+    if update_file "$TMP/ntfy.sources" "$NTFY_SOURCES" 644 root; then changed=1; fi
+    if update_file "$REPO/templates/ntfy.pref" "$NTFY_PIN" 644 root; then changed=1; fi
+    if (( changed )); then  # new repo: apt has to fetch its package list (also for the switch)
+        as_root apt-get update
+        APT_UPDATED=1
+    fi
 }
 
 ### 9b. Disk health
