@@ -1894,20 +1894,23 @@ setup_desireerr() {
         changed=1
     fi
     # It writes the scenes' .nfo files for Jellyfin beside them: the storage disk is writable
-    # in its sandbox (the rest stays read-only).
-    printf '%s\n' "# torrent-box: Desireerr writes the scenes' .nfo files (setup.sh writes this)" \
-        "[Service]" "ReadWritePaths=-$storage_root" >"$TMP/desireerr-storage.conf"
+    # in its sandbox (the rest stays read-only). And it reads Whisparr's API key from the
+    # config.xml in Whisparr's container folder.
+    printf '%s\n' "# torrent-box: Desireerr writes the scenes' .nfo files and reads Whisparr's key (setup.sh writes this)" \
+        "[Service]" "ReadWritePaths=-$storage_root" \
+        "Environment=DESIREERR_WHISPARR_CONFIG=$ARR_DIR/whisparr/config.xml" >"$TMP/desireerr-storage.conf"
     if update_file "$TMP/desireerr-storage.conf" "$USER_UNITS/desireerr.service.d/torrent-box.conf" 644; then
         changed=1
     fi
     if (( changed )); then run systemctl --user daemon-reload; fi
-    # Its admin is the login all the apps share, its StashDB key the one in secrets.ini, and
-    # with Jellyfin an API key named Desireerr for its Watch button (all through the
-    # environment, never the command line). It follows a changed login; an admin made on its
-    # first visit, or a key changed in its Settings, stay as they are.
+    # Its admin is the login all the apps share, its StashDB key the one in secrets.ini, with
+    # Jellyfin an API key named Desireerr for its Watch button, and its pushes go to our ntfy
+    # server and topic (all through the environment, never the command line). It follows a
+    # changed login or topic; an admin made on its first visit, or a key or topic changed in
+    # its Settings, stay as they are.
     if (( DRY_RUN )); then
-        info "would set its admin ('${rpc_user:-?}', the shared login), StashDB key and Jellyfin key, where not done yet"
-    elif [[ -n ${rpc_user:-} || -n $stashdb_key ]]; then
+        info "would set its admin ('${rpc_user:-?}', the shared login), StashDB key, Jellyfin key and ntfy topic, where not done yet"
+    elif [[ -n ${rpc_user:-} || -n $stashdb_key || -n ${ntfy_topic:-} ]]; then
         local out line jf_key=""
         if [[ $media_server == jellyfin ]] &&
                 ! jf_key=$(JF_USER=${JELLYFIN_USER:-${rpc_user:-}} JF_PASSWORD=${JELLYFIN_PASSWORD:-${rpc_password:-}} \
@@ -1917,6 +1920,7 @@ setup_desireerr() {
         fi
         if out=$(DESIREERR_ADMIN_USER=${rpc_user:-} DESIREERR_ADMIN_PASSWORD=${rpc_password:-} \
                 DESIREERR_STASHDB_KEY=$stashdb_key DESIREERR_JELLYFIN_KEY=$jf_key \
+                DESIREERR_NTFY_SERVER=${ntfy_server:-} DESIREERR_NTFY_TOPIC=${ntfy_topic:-} \
                 PYTHONDONTWRITEBYTECODE=1 python3 "$DESIREERR_DIR/desireerr.py" init --data "$DESIREERR_DATA"); then
             while IFS= read -r line; do info "$line"; done <<<"$out"
         else
