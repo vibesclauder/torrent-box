@@ -487,3 +487,6 @@ python3 -m unittest discover -s tests
 No network needed: the tests run against a fake nCore + Transmission server on localhost.
 `setup_helper.py` (the testable parts of `setup.sh`: settings.json merge, LAN detection,
 unit/INI rewriting) is covered too.
+
+`python3 tools/make_social.py` draws the repository's social preview
+(`.github/social-preview.png`, uploaded in GitHub's settings) from the start page's mark.
