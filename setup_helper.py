@@ -579,7 +579,7 @@ def ncore_login(prowlarr, code):
     indexer["enable"] = True
     set_fields(indexer, {"2facode": code})
     prowlarr.call("PUT", f"indexer/{indexer['id']}", indexer)  # tests it: the login
-    prowlarr.call("POST", "command", {"name": "ApplicationIndexerSync", "forceSync": True})
+    return prowlarr.call("POST", "command", {"name": "ApplicationIndexerSync", "forceSync": True})
 
 
 def transmission_fields(user, password):
@@ -692,13 +692,18 @@ def cmd_arr_connect(args):
 
 def cmd_ncore_code(args):
     """Ask for a fresh 2FA code and log Prowlarr in to nCore with it."""
+    import dashboard  # its search after a login (it's installed on its own, so not the reverse)
     _, apis = wait_arr_apps(args.arr_dir, 30)
     code = input("nCore 2FA code from your authenticator app: ").strip()
-    ncore_login(apis["prowlarr"], code)
+    since = dashboard.outage_start(args.arr_dir)
+    sync = ncore_login(apis["prowlarr"], code)
     state = load_state(args.arr_dir)
     state["ncore_on"] = True
     save_state(args.arr_dir, state)
     print("nCore: logged in; indexer sent to Sonarr and Radarr")
+    searched = dashboard.research(args.arr_dir, since, sync)
+    print("Searched again: " + ", ".join(searched) if searched
+          else "Nothing was waiting for nCore")
 
 
 def cmd_seerr_status(args):

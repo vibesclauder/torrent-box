@@ -109,6 +109,45 @@ class FakeProwlarr:
         self.httpd.server_close()
 
 
+class FakeApp:
+    """An app's API: GET replies from `routes` (path without /api/vN -> body), the rest
+    recorded in `posts` and answered with {}."""
+
+    def __init__(self, routes):
+        self.routes, self.posts = routes, []
+        outer = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def reply(self, code, body):
+                data = json.dumps(body).encode()
+                self.send_response(code)
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+            def do_GET(self):
+                path = self.path.split("/", 3)[3]
+                if path in outer.routes:
+                    return self.reply(200, outer.routes[path])
+                self.reply(404, {})
+
+            def do_POST(self):
+                body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                outer.posts.append((self.path.split("/", 3)[3], body))
+                self.reply(201, {})
+
+        self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.port = self.httpd.server_address[1]
+        threading.Thread(target=self.httpd.serve_forever, args=(0.01,), daemon=True).start()
+
+    def close(self):
+        self.httpd.shutdown()
+        self.httpd.server_close()
+
+
 class NcoreTest(unittest.TestCase):
     def setUp(self):
         self.tmpdir = tempfile.TemporaryDirectory()
@@ -160,8 +199,16 @@ class NcoreTest(unittest.TestCase):
         status = db.Status(self.arr_dir / "none.ini", self.arr_dir)
         self.assertEqual(status.login("12ab56"), (False, "a 2FA code is 6 digits"))
         self.assertEqual(self.prowlarr.requests, [])
-        self.assertEqual(status.login(FakeProwlarr.GOOD_CODE), (True, ""))
+        with mock.patch.object(db, "research", return_value=["1 movie"]) as research, \
+                mock.patch("sys.stderr"):
+            self.assertEqual(status.login(FakeProwlarr.GOOD_CODE), (True, ""))
+            for _ in range(100):
+                if status.last_login.get("searched"):
+                    break
+                time.sleep(0.01)
         self.assertTrue(status.last_login["ok"])
+        self.assertEqual(status.last_login["searched"], ["1 movie"])
+        self.assertEqual(research.call_args.args[0], self.arr_dir)
         for _ in range(db.LOGIN_TRIES - 1):
             self.assertEqual(status.login("654321"), (False, "Login failed"))
         ok, message = status.login(FakeProwlarr.GOOD_CODE)
@@ -477,6 +524,109 @@ class ChecksTest(unittest.TestCase):
         self.assertEqual(db.check_storage(s)["state"], db.WARN)
         s["require_mount"] = True  # tmp/storage isn't a mount point
         self.assertEqual(db.check_storage(s)["state"], db.DOWN)
+
+
+def stamp(t):
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(t))
+
+
+class ResearchTest(unittest.TestCase):
+    """After a new nCore code: searching again for what the apps wanted meanwhile."""
+
+    NOW = 1_800_000_000
+    SINCE = NOW - 3600
+
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmpdir.cleanup)
+        self.arr_dir = Path(self.tmpdir.name)
+        self.apps = {}
+
+    def app(self, name, routes):
+        (self.arr_dir / name).mkdir()
+        (self.arr_dir / name / "config.xml").write_text("<Config><ApiKey>KEY</ApiKey></Config>")
+        self.apps[name] = app = FakeApp(routes)
+        self.addCleanup(app.close)
+        patch = mock.patch.dict(db.ARR_APPS, {name: (app.port, "v1" if name == "prowlarr" else "v3")})
+        patch.start()
+        self.addCleanup(patch.stop)
+        return app
+
+    def test_movies(self):
+        new, old = stamp(self.NOW - 600), stamp(self.NOW - 86400)
+        movie = {"monitored": True, "hasFile": False, "isAvailable": True, "added": old}
+        radarr = self.app("radarr", {"health": [], "indexer": [], "movie": [
+            dict(movie, id=1, added=new),                      # requested meanwhile
+            dict(movie, id=2),                                 # earlier: searched then
+            dict(movie, id=3, digitalRelease=new),             # came out meanwhile
+            dict(movie, id=4, added=new, hasFile=True),
+            dict(movie, id=5, added=new, monitored=False),
+            dict(movie, id=6, added=new, isAvailable=False),   # not out yet
+            dict(movie, id=7, digitalRelease=stamp(self.NOW + 86400))]})
+        self.assertEqual(db.research(self.arr_dir, self.SINCE, now=self.NOW), ["2 movies"])
+        self.assertEqual(radarr.posts, [("command", {"name": "MoviesSearch", "movieIds": [1, 3]})])
+
+    def test_newest_first_and_capped(self):
+        whisparr = self.app("whisparr", {"health": [], "indexer": [], "movie": [
+            {"id": i, "monitored": True, "hasFile": False, "added": stamp(self.SINCE + i)}
+            for i in range(1, db.RESEARCH_MAX + 6)]})
+        self.assertEqual(db.research(self.arr_dir, self.SINCE, now=self.NOW),
+                         [f"{db.RESEARCH_MAX} scenes"])
+        ids = whisparr.posts[0][1]["movieIds"]
+        self.assertEqual((len(ids), ids[0]), (db.RESEARCH_MAX, db.RESEARCH_MAX + 5))
+
+    def test_series(self):
+        new, old = stamp(self.NOW - 600), stamp(self.NOW - 86400)
+        sonarr = self.app("sonarr", {"health": [], "indexer": [], (
+            "wanted/missing?page=1&pageSize=1000&monitored=true&includeSeries=true"
+            "&sortKey=airDateUtc&sortDirection=descending"): {"records": [
+                {"id": 10, "seriesId": 1, "airDateUtc": old, "series": {"added": new}},
+                {"id": 11, "seriesId": 1, "airDateUtc": old, "series": {"added": new}},
+                {"id": 20, "seriesId": 2, "airDateUtc": new, "series": {"added": old}},
+                {"id": 21, "seriesId": 2, "airDateUtc": old, "series": {"added": old}}]}})
+        self.assertEqual(db.research(self.arr_dir, self.SINCE, now=self.NOW),
+                         ["1 series", "1 episode"])
+        self.assertEqual(sonarr.posts, [("command", {"name": "SeriesSearch", "seriesId": 1}),
+                                        ("command", {"name": "EpisodeSearch", "episodeIds": [20]})])
+
+    def test_indexer_left_out_after_failures_is_tested_first(self):
+        indexer = {"id": 1, "name": "nCore (Prowlarr)", "enableRss": True}
+        radarr = self.app("radarr", {"indexer": [indexer], "movie": [], "health": [
+            {"source": "IndexerStatusCheck", "type": "error",
+             "message": "All indexers are unavailable due to failures"}]})
+        self.assertEqual(db.research(self.arr_dir, self.SINCE, now=self.NOW), [])
+        self.assertEqual(radarr.posts, [("indexer/test", indexer)])
+        radarr.routes["health"], radarr.posts[:] = [], []
+        db.research(self.arr_dir, self.SINCE, now=self.NOW)
+        self.assertEqual(radarr.posts, [])  # healthy: no test
+
+    def test_waits_for_prowlarrs_sync_and_reports_failures(self):
+        prowlarr = self.app("prowlarr", {"command/5": {"id": 5, "status": "completed"}})
+        self.app("radarr", {"health": []})  # no /movie
+        self.assertEqual(db.research(self.arr_dir, self.SINCE, {"id": 5}, now=self.NOW),
+                         ["Radarr failed: HTTP 404"])
+        self.assertEqual(prowlarr.posts, [])
+        # not set up at all: left out
+        self.assertEqual(db.research(Path(self.tmpdir.name) / "none", self.SINCE), [])
+
+    def test_outage_start(self):
+        prowlarr = self.app("prowlarr", {"indexerstatus": [
+            {"indexerId": 7, "initialFailure": stamp(self.NOW - 7200)}]})
+        self.assertEqual(db.outage_start(self.arr_dir, self.NOW),
+                         self.NOW - 7200 - db.RESEARCH_MARGIN)
+        prowlarr.routes["indexerstatus"] = [{"indexerId": 7, "initialFailure": stamp(self.NOW - 30 * 86400)}]
+        self.assertEqual(db.outage_start(self.arr_dir, self.NOW), self.NOW - db.RESEARCH_LONGEST)
+        prowlarr.routes["indexerstatus"] = []  # switched off, or it doesn't remember
+        self.assertEqual(db.outage_start(self.arr_dir, self.NOW), self.NOW - db.RESEARCH_DEFAULT)
+
+    def test_page_says_what_was_searched(self):
+        now = time.time()
+        for searched, text in ((None, "searching again"), ([], "nothing was waiting"),
+                               (["1 movie"], "searched again: 1 movie")):
+            with self.subTest(searched=searched), mock.patch.object(
+                    db, "find_ncore", side_effect=db.LoginError("x")):
+                login = {"time": now, "ok": True, "message": "", "searched": searched}
+                self.assertIn(text, " ".join(db.check_ncore(self.arr_dir, login, now)["details"]))
 
 
 class PageTest(unittest.TestCase):

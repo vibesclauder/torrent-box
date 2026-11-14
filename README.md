@@ -330,6 +330,15 @@ Prowlarr's web page: a login made while *adding* an indexer isn't kept (Prowlarr
 the session of a saved indexer), so the first search would log in again with the old code.
 Setup adds it switched off and then switches it on with the code for that reason.
 
+A fresh code from the start page or `ncore-code` also starts a search again for what Sonarr,
+Radarr and Whisparr wanted while nCore was out: they search for a movie or series only once,
+when it's added, and a search that failed then is never retried (RSS only brings new
+uploads), so a Seerr request made meanwhile would just sit there. That's what's missing and
+was added or came out since nCore's first failure (an hour before it, or the last 3 days if
+Prowlarr doesn't remember one; at most 2 weeks), the newest 30 per app; the start page says
+what was searched. Logging in by hand in Prowlarr doesn't do this: then use Wanted → Missing
+→ Search All in each app.
+
 Left to you: the quality profiles (Sonarr/Radarr → Settings → Profiles; the HUN score is
 yours to change), importing existing series/movies (Library Import), and Seerr's users
 (Users → Import Jellyfin users; request limits, approval). A setting setup made that you

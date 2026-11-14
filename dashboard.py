@@ -46,6 +46,15 @@ LOGIN_TIMEOUT = 60  # Prowlarr logs in to nCore while saving the indexer
 LOGIN_TRIES = 5  # 2FA logins per LOGIN_WINDOW, so nobody on the LAN can hammer nCore's login
 LOGIN_WINDOW = 15 * 60
 SHOW_LOGIN = 10 * 60  # how long the page shows how the last code went
+# After a new code, what the apps wanted while nCore was out is searched again: from a while
+# before the first failure (the session ended a bit earlier), or the last RESEARCH_DEFAULT
+# when no app remembers one, never further back than RESEARCH_LONGEST; the newest
+# RESEARCH_MAX per app, since nCore limits requests.
+RESEARCH_MARGIN = 3600
+RESEARCH_DEFAULT = 3 * 86400
+RESEARCH_LONGEST = 14 * 86400
+RESEARCH_MAX = 30
+SYNC_WAIT = 60  # for Prowlarr to send the indexer to the apps again
 CODE = re.compile(r"\d{6,8}")
 WATCH_EVERY = 60
 ALERT_AFTER = 10 * 60  # a restart or a slow start shouldn't push
@@ -438,7 +447,123 @@ def ncore_login(arr_dir, code):
     indexer["enable"] = True
     fields["2facode"]["value"] = code
     prowlarr_call(arr_dir, "PUT", f"indexer/{indexer['id']}", indexer, LOGIN_TIMEOUT)
-    prowlarr_call(arr_dir, "POST", "command", {"name": "ApplicationIndexerSync", "forceSync": True})
+    return prowlarr_call(arr_dir, "POST", "command",
+                         {"name": "ApplicationIndexerSync", "forceSync": True})
+
+
+# Sonarr, Radarr and Whisparr search for something once, when it's added (or for an episode,
+# by RSS when it's uploaded). When nCore was logged out then, that search failed and nothing
+# tries again: a request made meanwhile just sat there. So after a new code, what they wanted
+# while nCore was out gets searched again.
+
+def arr_call(arr_dir, app, method, path, body=None, timeout=LOGIN_TIMEOUT):
+    """An app's API; OSError (or ValueError for a reply that isn't JSON) when it fails."""
+    key = api_key(Path(arr_dir) / app / "config.xml")
+    if not key:
+        raise OSError(f"{app} has no API key")
+    port, version = ARR_APPS[app]
+    req = urllib.request.Request(
+        f"http://127.0.0.1:{port}/api/{version}/{path}", method=method,
+        data=json.dumps(body).encode() if body is not None else None,
+        headers={"X-Api-Key": key, "Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        text = resp.read().decode()
+    return json.loads(text) if text.strip() else None
+
+
+def outage_start(arr_dir, now=None):
+    """Since when the apps wanted things nCore couldn't give: from Prowlarr's first failure
+    (read before logging in, which clears it)."""
+    now = now or time.time()
+    try:
+        firsts = [iso_time(st.get("initialFailure"))
+                  for st in arr_call(arr_dir, "prowlarr", "GET", "indexerstatus", timeout=TIMEOUT)]
+    except (OSError, ValueError):
+        firsts = []
+    firsts = [t for t in firsts if t]
+    since = min(firsts) - RESEARCH_MARGIN if firsts else now - RESEARCH_DEFAULT
+    return max(since, now - RESEARCH_LONGEST)
+
+
+def wait_for_command(arr_dir, app, command, seconds=SYNC_WAIT):
+    deadline = time.monotonic() + seconds
+    while command and command.get("id") and time.monotonic() < deadline:
+        try:
+            command = arr_call(arr_dir, app, "GET", f"command/{command['id']}")
+        except (OSError, ValueError):
+            return
+        if command.get("status") in ("completed", "failed", "aborted", "cancelled", "orphaned"):
+            return
+        time.sleep(1)
+
+
+def revive_indexers(arr_dir, app):
+    """After failures an app leaves an indexer out for a while, longer each time (up to a
+    day); a successful test ends that, so the search right after the login uses nCore. Which
+    one is left out only shows in its health checks."""
+    if not any(i.get("source", "").startswith("Indexer")
+               for i in arr_call(arr_dir, app, "GET", "health")):
+        return
+    for indexer in arr_call(arr_dir, app, "GET", "indexer"):
+        if indexer.get("enableRss") or indexer.get("enableAutomaticSearch"):
+            try:
+                arr_call(arr_dir, app, "POST", "indexer/test", indexer)
+            except (OSError, ValueError):
+                pass  # then the search finds no indexer, as it would have anyway
+
+
+def wanted_since(item, since, now, keys):
+    return any(t and since <= t <= now for t in (iso_time(item.get(k)) for k in keys))
+
+
+def research_movies(arr_dir, app, since, now):
+    """Radarr's movies (Whisparr's scenes) without a file, added or released since."""
+    movies = [m for m in arr_call(arr_dir, app, "GET", "movie")
+              if m.get("monitored") and not m.get("hasFile") and m.get("isAvailable", True)
+              and wanted_since(m, since, now, ("added", "inCinemas", "digitalRelease",
+                                               "physicalRelease", "releaseDate"))]
+    movies.sort(key=lambda m: iso_time(m.get("added")) or 0, reverse=True)
+    ids = [m["id"] for m in movies[:RESEARCH_MAX]]
+    if ids:
+        arr_call(arr_dir, app, "POST", "command", {"name": "MoviesSearch", "movieIds": ids})
+    noun = "scene" if app == "whisparr" else "movie"
+    return [f"{len(ids)} {noun}{'s' if len(ids) > 1 else ''}"] if ids else []
+
+
+def research_series(arr_dir, app, since, now):
+    """Sonarr's missing episodes: whole series added since (season packs first), and the
+    episodes of others that aired since."""
+    records = arr_call(arr_dir, app, "GET", "wanted/missing?page=1&pageSize=1000&monitored=true"
+                       "&includeSeries=true&sortKey=airDateUtc&sortDirection=descending")["records"]
+    series = list(dict.fromkeys(r["seriesId"] for r in records
+                                if wanted_since(r.get("series") or {}, since, now, ("added",))))
+    series = series[:RESEARCH_MAX]
+    episodes = [r["id"] for r in records if r["seriesId"] not in series
+                and wanted_since(r, since, now, ("airDateUtc",))][:RESEARCH_MAX]
+    for sid in series:
+        arr_call(arr_dir, app, "POST", "command", {"name": "SeriesSearch", "seriesId": sid})
+    if episodes:
+        arr_call(arr_dir, app, "POST", "command", {"name": "EpisodeSearch", "episodeIds": episodes})
+    return ([f"{len(series)} series"] if series else []) + \
+        ([f"{len(episodes)} episode{'s' if len(episodes) > 1 else ''}"] if episodes else [])
+
+
+def research(arr_dir, since, sync=None, now=None):
+    """Search again for what the apps wanted since `since`, once Prowlarr's `sync` command
+    has sent them the indexer. Returns what was searched ("1 movie", …) and what failed."""
+    wait_for_command(arr_dir, "prowlarr", sync)
+    now = now or time.time()
+    done = []
+    for app, search in (("sonarr", research_series), ("radarr", research_movies),
+                        ("whisparr", research_movies)):
+        if not api_key(Path(arr_dir) / app / "config.xml"):
+            continue  # not set up
+        try:
+            revive_indexers(arr_dir, app)
+            done += search(arr_dir, app, since, now)
+        except (OSError, ValueError, KeyError) as e:
+            done.append(f"{app.capitalize()} failed: {problem(e) if isinstance(e, OSError) else e}")
+    return done
 
 
 def iso_time(value):
@@ -457,6 +582,11 @@ def check_ncore(arr_dir, last_login=None, now=None):
         at = ago(now - last_login["time"])
         details.append(f"logged in with the new code {at}" if last_login["ok"]
                        else f"the code didn't work ({at}): {last_login['message']}")
+        if "searched" in last_login:
+            searched = last_login["searched"]
+            details.append("searching again for what was requested meanwhile…" if searched is None
+                           else "searched again: " + ", ".join(searched) if searched
+                           else "nothing was waiting for nCore")
     try:
         indexer = find_ncore(arr_dir)
         if indexer is None:
@@ -1182,17 +1312,32 @@ class Status:
                 ok, message = False, f"{LOGIN_TRIES} tries in {LOGIN_WINDOW // 60} minutes, wait a little"
             else:
                 self.tries.append(now)
+                since = outage_start(self.arr_dir)
                 try:
-                    ncore_login(self.arr_dir, code)
+                    sync = ncore_login(self.arr_dir, code)
                     ok, message = True, ""
                 except LoginError as e:
                     ok, message = False, str(e)
             self.last_login = {"time": time.time(), "ok": ok, "message": message}
+            if ok:
+                self.last_login["searched"] = None
+                threading.Thread(target=self.research, args=(self.last_login, since, sync),
+                                 daemon=True).start()
             with self.lock:
                 self.latest = None  # show it right away
             return ok, message
         finally:
             self.login_lock.release()
+
+    def research(self, login, since, sync):
+        try:
+            searched = research(self.arr_dir, since, sync)
+        except Exception as e:  # a thread of its own: say so rather than die quietly
+            searched = [f"failed: {e!r}"]
+        print(f"after the nCore login, searched again: {searched}", file=sys.stderr, flush=True)
+        login["searched"] = searched
+        with self.lock:
+            self.latest = None
 
 
 class Handler(BaseHTTPRequestHandler):
