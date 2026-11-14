@@ -394,7 +394,7 @@ class ChecksTest(unittest.TestCase):
             c = db.check_transmission(self.settings(server.base_url))
         self.assertEqual(c["state"], db.OK)
         self.assertEqual(c["summary"], "1 downloading, 2 seeding, ↓ 2.0 MB/s ↑ 512.0 KB/s")
-        self.assertEqual(c["details"], ["1 with a tracker warning"])
+        self.assertEqual((c["details"], c["upstream"]), ([], ["1 with a tracker warning"]))
 
     @mock.patch.object(db, "service_check", RUNNING)
     def test_transmission_local_errors_and_bad_login(self):
@@ -443,14 +443,14 @@ class ChecksTest(unittest.TestCase):
         with mock.patch.dict(db.ARR_APPS, {"sonarr": (arr.port, "v3"), "prowlarr": (arr.port, "v1")}):
             c = db.check_arr("sonarr", self.tmp)
             self.assertEqual((c["state"], c["summary"]), (db.OK, "healthy"))
-            self.assertEqual(len(c["details"]), 2)
-            self.assertTrue(c["details"][0].startswith("not its own problem: Indexers"))
+            self.assertEqual((c["details"], len(c["upstream"])), ([], 2))
+            self.assertTrue(c["upstream"][0].startswith("Indexers unavailable"))
             # its indexers are Prowlarr's own business
             self.assertEqual(db.check_arr("prowlarr", self.tmp)["state"], db.WARN)
             arr.issues = [rate_limited, root]
             c = db.check_arr("sonarr", self.tmp)
             self.assertEqual((c["state"], c["summary"]), (db.WARN, "1 issue"))
-            self.assertEqual(c["details"][0], "Missing root folder")
+            self.assertEqual((c["details"], c["upstream"]), (["Missing root folder"], [rate_limited["message"]]))
 
     def test_rss2transmission(self):
         now = 1_800_000_000
@@ -502,6 +502,8 @@ class PageTest(unittest.TestCase):
         self.assertNotIn(":8096/", page)  # no Jellyfin check, no tile
         self.assertIn("1 thing needs a look", page)
         self.assertIn("&lt;b&gt;nCore&lt;/b&gt;", page)  # escaped
+        self.assertIn('class="alert own"', page)  # a tile's problems: a red sign with a tooltip
+        self.assertNotIn('class="alert upstream"', page)
         self.assertIn("smb://box.lan/storage", page)
         self.assertIn("<title>⚠ box · torrent-box</title>", page)
 

@@ -150,8 +150,10 @@ def load_settings(config_path):
 
 ### Helpers
 
-def result(state, summary, details=(), **extra):
-    return {"state": state, "summary": summary, "details": list(details), **extra}
+def result(state, summary, details=(), upstream=(), **extra):
+    """A check's outcome. upstream: what it reports about something else (nCore, Prowlarr)."""
+    return {"state": state, "summary": summary, "details": list(details),
+            "upstream": list(upstream), **extra}
 
 
 def human_size(n):
@@ -292,9 +294,8 @@ def check_transmission(s):
     if len(broken) > 5:
         details.append(f"… and {len(broken) - 5} more")
     tracker = sum(t["error"] in (1, 2) for t in torrents)
-    if tracker:
-        details.append(f"{tracker} with a tracker warning")
-    return result(WARN if broken else OK, ", ".join(parts), details)
+    upstream = [f"{tracker} with a tracker warning"] if tracker else []
+    return result(WARN if broken else OK, ", ".join(parts), details, upstream)
 
 
 def check_jellyfin(s):
@@ -362,9 +363,8 @@ def check_arr(name, arr_dir):
     elsewhere = [i.get("message", "?") for i in issues if upstream_issue(name, i)]
     issues = [i.get("message", "?") for i in issues if not upstream_issue(name, i)]
     if not issues:
-        return result(OK, "healthy", [f"not its own problem: {m}" for m in elsewhere])
-    return result(WARN, f"{len(issues)} issue{'s' if len(issues) > 1 else ''}",
-                  issues + [f"not its own problem: {m}" for m in elsewhere])
+        return result(OK, "healthy", upstream=elsewhere)
+    return result(WARN, f"{len(issues)} issue{'s' if len(issues) > 1 else ''}", issues, elsewhere)
 
 
 # Health checks of Sonarr, Radarr and Whisparr that report on something else: their
@@ -740,7 +740,7 @@ def push_event(s, kind, cid, c):
     name = dict((i, n) for i, n, *_ in TILES + ROWS).get(cid, cid)
     if kind == "down":
         title = f"{name} is down" if c["state"] == DOWN else f"{name} needs a look"
-        message = "\n".join([c["summary"], *c["details"]])
+        message = "\n".join([c["summary"], *c["details"], *upstream_lines(c)])
         priority, tags = s["priority_problem"], ["rotating_light" if c["state"] == DOWN else "warning"]
     else:
         title, message, priority, tags = f"{name} is fine again", c["summary"], 3, ["white_check_mark"]
@@ -916,6 +916,7 @@ a.tile:hover{border-color:var(--accent);transform:translateY(-2px)}
 .badge{width:44px;height:44px;border-radius:12px;display:grid;place-items:center;flex:none}
 .badge svg{width:24px;height:24px}
 .logo{width:44px;height:44px;flex:none;object-fit:contain}
+.tile>div{flex:1;min-width:0}
 .tile .name{display:flex;align-items:center;justify-content:space-between;gap:8px}
 .tile b{font-size:17px}
 .dot{display:inline-block;width:10px;height:10px;border-radius:50%%;flex:none;background:var(--muted)}
@@ -938,6 +939,18 @@ background:var(--soft);color:var(--accent)}
 .bar i{display:block;height:100%%;background:linear-gradient(90deg,var(--b1),var(--b2))}
 .bar.warn i{background:var(--warn)}
 ul.details{margin:4px 0 0;padding-left:18px;color:var(--muted);font-size:13px}
+a.tile:hover{position:relative;z-index:2}
+.flags{display:flex;align-items:center;gap:6px;margin-left:auto}
+.alert{position:relative;display:grid;cursor:help}
+.alert svg{width:19px;height:19px}
+.alert.own{color:var(--down)}.alert.upstream{color:var(--warn)}
+.tip{display:none;position:absolute;z-index:3;top:calc(100%% + 6px);right:-6px;width:max-content;
+max-width:min(300px,80vw);padding:10px 12px;border-radius:10px;font-size:13px;font-weight:400;
+color:var(--fg);background:var(--card);border:1px solid var(--line);
+box-shadow:0 8px 28px rgba(0,0,0,.28)}
+.tip b{display:block;margin-bottom:4px;font-size:12px;color:var(--muted)}
+.tip ul{margin:0;padding-left:16px}
+.alert:hover .tip,.alert.open .tip{display:block}
 code{font-size:13px}
 a{color:var(--accent)}
 form.code{display:flex;gap:8px;margin-top:8px}
@@ -963,7 +976,7 @@ function localTimes(){  // the box's times in the viewer's time zone
 }
 localTimes();
 function busy(){  // don't swap the page under someone typing a code
-  return document.querySelector("main details[open]")||
+  return document.querySelector("main details[open], main .alert.open")||
     [...document.querySelectorAll("main input")].some(i=>i.value)||
     document.activeElement?.closest?.("main form");
 }
@@ -981,6 +994,11 @@ async function refresh(){
   }
 }
 setInterval(refresh,%d000);
+document.addEventListener("click",ev=>{  // tap an alert for its list (phones have no hover)
+  const a=ev.target.closest(".alert");
+  for(const o of document.querySelectorAll(".alert.open"))if(o!==a)o.classList.remove("open");
+  if(a){ev.preventDefault();a.classList.toggle("open");}
+});
 document.addEventListener("submit",ev=>{
   const b=ev.target.querySelector("button");
   b.disabled=true;b.textContent="Logging in…";
@@ -988,11 +1006,29 @@ document.addEventListener("submit",ev=>{
 """ % REFRESH_SECONDS
 
 
+def upstream_lines(c):
+    return [f"not its own problem: {m}" for m in c["upstream"]]
+
+
 def details_html(details):
     if not details:
         return ""
     items = "".join(f"<li>{html.escape(d)}</li>" for d in details)
     return f'<ul class="details">{items}</ul>'
+
+
+ALERT_ICON = ('<path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z" '
+              'fill="currentColor" stroke="none"/><path d="M12 9v4M12 17h.01" stroke="#fff"/>')
+
+
+def alert_html(kind, heading, items):
+    """A tile's warning sign, its list in a tooltip: red for the app's own problems, yellow
+    for what it reports about something else."""
+    if not items:
+        return ""
+    lis = "".join(f"<li>{html.escape(i)}</li>" for i in items)
+    return (f'<span class="alert {kind}" role="img" aria-label="{heading}: {len(items)}">'
+            f'{glyph(ALERT_ICON, "currentColor")}<span class="tip"><b>{heading}</b><ul>{lis}</ul></span></span>')
 
 
 def render(status, host):
@@ -1024,9 +1060,11 @@ def render(status, host):
                      f'{glyph(paths, "#fff")}</span>')
         tiles.append(
             f'<a class="tile" href="http://{e(host)}:{port}/">{badge}<div>'
-            f'<div class="name"><b>{name}</b><span class="dot {c["state"]}" title="{c["state"]}"></span></div>'
-            f'<div class="muted">{purpose}</div><div>{e(c["summary"])}</div>'
-            f'{details_html(c["details"])}</div></a>')
+            f'<div class="name"><b>{name}</b><span class="flags">'
+            f'{alert_html("own", "Its own problems", c["details"])}'
+            f'{alert_html("upstream", "Not its own problem", c["upstream"])}'
+            f'<span class="dot {c["state"]}" title="{c["state"]}"></span></span></div>'
+            f'<div class="muted">{purpose}</div><div>{e(c["summary"])}</div></div></a>')
 
     rows = []
     for cid, name in ROWS:
@@ -1057,7 +1095,7 @@ def render(status, host):
             f'<div class="row" id="{cid}"><div class="label">'
             f'<span class="ricon">{glyph(ROW_ICONS[cid], "currentColor")}</span><b>{name}</b>'
             f'<span class="dot {c["state"]}" title="{c["state"]}"></span></div>'
-            f'<div>{e(c["summary"])}{extra}{details_html(c["details"])}</div></div>')
+            f'<div>{e(c["summary"])}{extra}{details_html(c["details"] + upstream_lines(c))}</div></div>')
 
     hostname = e(status["hostname"])
     # The box's clock is often UTC: the script shows it in the viewer's time zone, and without
