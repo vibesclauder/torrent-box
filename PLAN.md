@@ -432,6 +432,11 @@ testing lives in `setup_helper.py` (stdlib Python, unit-tested); `setup.sh` is t
    Pushes: a thread checks every 60 s; a check at WARN or worse for 10 min → one push
    (`priority_problem`), back to OK → one more; storage/ncore never (rss2transmission and
    Prowlarr push those), prowlarr/disk only when DOWN (their own pushes cover the rest).
+   Updates: setup.sh stamps `COMMIT`/`REPO_DIR` next to `VERSION`; the same thread asks
+   GitHub's API every 6 h (1 h after a failure) for `compare/<COMMIT>...main`; ahead → the
+   new version (VERSION at the commit that last changed it + commits since, newest commit's
+   time, as `repo_version`), a banner, and one push per new head, at most daily; what was
+   pushed is kept in `StateDirectory=` (`/var/lib/torrent-box-dashboard/update.json`).
    Tile logos: the apps' own, from their install (Jellyfin `web/icon-transparent.*.png`,
    transmission-common's hicolor SVG) or served by the container (`Content/Images/logo.svg`,
    Seerr `os_icon.svg`); fixed sources only, cached, served at `/icon/<app>` with a CSP that

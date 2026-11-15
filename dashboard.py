@@ -8,7 +8,8 @@ API keys, and never shows a secret. GET /status.json returns the same data as JS
 With Prowlarr, POST /ncore-code takes a fresh nCore 2FA code (the page shows a form for it
 while one is needed).
 It also watches: whatever stays wrong for ALERT_AFTER is pushed to the ntfy topic, and
-pushed again once it's fine.
+pushed again once it's fine. And every UPDATE_EVERY it asks GitHub whether torrent-box has
+moved on since the commit it was installed from: a banner on the page, and one push.
 
 Standard library only; one round of checks serves every request for a few seconds.
 """
@@ -36,6 +37,14 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 VERSION = ""  # "1.0 rev 2, 2026-11-09 13:31": setup.sh writes it in when installing
+COMMIT = ""  # the commit it was installed from (setup.sh too); none: no update checks
+REPO_DIR = ""  # the checkout setup.sh ran from, for the update banner's "git pull"
+GITHUB_REPO = "vibesclauder/torrent-box"
+BRANCH = "main"
+UPDATE_EVERY = 6 * 3600  # how often GitHub is asked (60 requests an hour are free)
+UPDATE_RETRY = 3600  # after a failed check
+UPDATE_PUSH_EVERY = 86400  # at most one update push this often, however many commits land
+UPDATE_SUBJECTS = 5  # commit subjects shown on the page and in the push
 DEFAULT_CONFIG = Path("~/.config/rss2transmission/config.ini").expanduser()
 DEFAULT_ARR_DIR = Path("~/.local/share/torrent-box/arr").expanduser()
 CACHE_SECONDS = 5
@@ -865,8 +874,6 @@ class Watcher:
 
 def push_event(s, kind, cid, c):
     """A push for a Watcher event; False if it couldn't be sent."""
-    if not s["ntfy_topic"]:
-        return True
     name = dict((i, n) for i, n, *_ in TILES + ROWS).get(cid, cid)
     if kind == "down":
         title = f"{name} is down" if c["state"] == DOWN else f"{name} needs a look"
@@ -874,8 +881,15 @@ def push_event(s, kind, cid, c):
         priority, tags = s["priority_problem"], ["rotating_light" if c["state"] == DOWN else "warning"]
     else:
         title, message, priority, tags = f"{name} is fine again", c["summary"], 3, ["white_check_mark"]
+    return send_push(s, title, message, priority, tags)
+
+
+def send_push(s, title, message, priority, tags, click=None):
+    """False if it couldn't be sent; True also when pushes are off (no topic)."""
+    if not s["ntfy_topic"]:
+        return True
     body = {"topic": s["ntfy_topic"], "title": title, "message": message, "priority": priority,
-            "tags": tags, "click": f"http://{socket.gethostname()}/"}
+            "tags": tags, "click": click or f"http://{socket.gethostname()}/"}
     req = urllib.request.Request(s["ntfy_server"], data=json.dumps(body).encode(),
                                  headers={"Content-Type": "application/json"})
     try:
@@ -886,6 +900,98 @@ def push_event(s, kind, cid, c):
         return False
     print(f"pushed: {title}", file=sys.stderr, flush=True)
     return True
+
+
+### Updates
+
+def github(path, timeout=15):
+    """GitHub's REST API for the repo (no token: 60 requests an hour per address)."""
+    return json.loads(http_get(f"https://api.github.com/repos/{GITHUB_REPO}/{path}", headers={
+        "Accept": "application/vnd.github+json", "User-Agent": "torrent-box-dashboard"},
+        timeout=timeout))
+
+
+def remote_version(fetch, head_date):
+    """The version setup.sh would install from BRANCH: VERSION's number, one revision more per
+    commit since VERSION last changed, and the newest commit's time (as setup.sh's
+    repo_version)."""
+    base = fetch(f"commits?sha={BRANCH}&path=VERSION&per_page=1")[0]["sha"]
+    number = base64.b64decode(fetch(f"contents/VERSION?ref={base}")["content"]).decode().strip()
+    m = re.fullmatch(r"(.*rev )(\d+)", number)
+    if m:
+        number = f"{m.group(1)}{int(m.group(2)) + fetch(f'compare/{base}...{BRANCH}')['ahead_by']}"
+    when = time.localtime(calendar.timegm(time.strptime(head_date, "%Y-%m-%dT%H:%M:%SZ")))
+    return f"{number}, {time.strftime('%Y-%m-%d %H:%M', when)}"
+
+
+def check_update(commit=None, fetch=github):
+    """None when there's nothing to compare (not installed from git); else what BRANCH has
+    that the installed commit hasn't: {"commits": 0} when nothing."""
+    commit = COMMIT if commit is None else commit
+    if not commit:
+        return None
+    diff = fetch(f"compare/{commit}...{BRANCH}")
+    if not diff.get("ahead_by"):
+        return {"commits": 0}
+    commits = diff["commits"]  # oldest first
+    return {"commits": diff["ahead_by"], "head": commits[-1]["sha"],
+            "version": remote_version(fetch, commits[-1]["commit"]["committer"]["date"]),
+            "subjects": [c["commit"]["message"].split("\n", 1)[0] for c in reversed(commits)]
+                        [:UPDATE_SUBJECTS],
+            "url": diff.get("html_url") or f"https://github.com/{GITHUB_REPO}"}
+
+
+def update_command():
+    where = REPO_DIR or "torrent-box"
+    home = os.path.expanduser("~")
+    if home != "/" and (where == home or where.startswith(home + "/")):
+        where = "~" + where[len(home):]
+    return f"cd {where} && git pull && ./setup.sh"
+
+
+class Updates:
+    """Asks GitHub every UPDATE_EVERY (UPDATE_RETRY after a failure); pushes a new head once,
+    at most every UPDATE_PUSH_EVERY. What was pushed is kept in state_dir/update.json, so a
+    restart doesn't push it again (no state_dir: remembered until then)."""
+
+    def __init__(self, state_dir=None, check=check_update):
+        self.check, self.info, self.due = check, None, 0.0
+        self.path = Path(state_dir) / "update.json" if state_dir else None
+        self.pushed = {}
+        try:
+            self.pushed = json.loads(self.path.read_text()) if self.path else {}
+        except (OSError, ValueError):
+            pass
+
+    def poll(self, settings, now):
+        if now < self.due:
+            return
+        try:
+            self.info = self.check()
+            self.due = now + UPDATE_EVERY
+        except (OSError, ValueError, LookupError) as e:
+            print(f"update check failed: {problem(e) if isinstance(e, OSError) else repr(e)}",
+                  file=sys.stderr, flush=True)
+            self.due = now + UPDATE_RETRY
+            return
+        info = self.info
+        if not info or not info["commits"] or info["head"] == self.pushed.get("head") \
+                or now - self.pushed.get("time", now - UPDATE_PUSH_EVERY) < UPDATE_PUSH_EVERY:
+            return
+        n = info["commits"]
+        message = "\n".join([f"{n} new commit{'s' if n > 1 else ''} (you have {VERSION or '?'}):",
+                             *(f"• {line}" for line in info["subjects"]),
+                             *([f"… and {n - len(info['subjects'])} more"]
+                               if n > len(info["subjects"]) else []),
+                             f"To update: {update_command()}"])
+        if send_push(settings, f"torrent-box {info['version']} is available", message, 3,
+                     ["arrow_up"], info["url"]):
+            self.pushed = {"head": info["head"], "time": now}
+            if self.path:
+                try:
+                    self.path.write_text(json.dumps(self.pushed))
+                except OSError as e:
+                    print(f"can't remember the update push: {e}", file=sys.stderr, flush=True)
 
 
 ### Logos
@@ -1037,6 +1143,8 @@ h2{font-size:12px;text-transform:uppercase;letter-spacing:.09em;color:var(--mute
 .banner{margin-top:18px;padding:12px 16px;border-radius:14px;background:var(--card);box-shadow:var(--shadow);
 border:1px solid var(--line);border-left:5px solid var(--warn)}
 .banner.down{border-left-color:var(--down)}
+.banner.update{border-left-color:var(--accent)}
+.banner code{font-size:13px}
 .banner ul{margin:6px 0 0;padding-left:20px}
 .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:12px}
 .tile{display:flex;gap:14px;align-items:flex-start;padding:16px;background:var(--card);
@@ -1176,6 +1284,17 @@ def render(status, host):
         banner = f'<div class="banner {worst}"><b>{headline}</b><ul>{items}</ul></div>'
     else:
         headline, banner = "All systems go", ""
+    update = status.get("update")
+    if update and update.get("commits"):
+        n = update["commits"]
+        items = "".join(f"<li>{e(line)}</li>" for line in update["subjects"])
+        if n > len(update["subjects"]):
+            items += f"<li>… and {n - len(update['subjects'])} more</li>"
+        banner += (f'<div class="banner update"><b>Update available: torrent-box '
+                   f'{e(update["version"])}</b> <span class="muted">({n} new commit'
+                   f'{"s" if n > 1 else ""}; you have {e(VERSION or "?")})</span><ul>{items}</ul>'
+                   f'<div class="muted">To update, on the box: <code>{e(update_command())}</code>'
+                   f' · <a href="{e(update["url"])}">what changed</a></div></div>')
 
     tiles = []
     for cid, name, purpose, port in TILES:
@@ -1254,7 +1373,7 @@ def render(status, host):
 <h2>Health</h2>
 <div class="rows">{"".join(rows)}</div>
 <footer><span id="updated">Updated {updated}, refreshes every {REFRESH_SECONDS} s.</span>
-<span>torrent-box{" " + e(VERSION) if VERSION else ""} · <a href="https://github.com/vibesclauder/torrent-box">GitHub</a></span></footer>
+<span>torrent-box{" " + e(VERSION) if VERSION else ""} · <a href="https://github.com/{GITHUB_REPO}">GitHub</a></span></footer>
 </main>
 </div><script>{SCRIPT}</script></body></html>
 """
@@ -1265,8 +1384,9 @@ def render(status, host):
 class Status:
     """The latest round of checks, shared by all requests for CACHE_SECONDS."""
 
-    def __init__(self, config, arr_dir):
+    def __init__(self, config, arr_dir, state_dir=None):
         self.config, self.arr_dir = config, arr_dir
+        self.updates = Updates(state_dir)
         self.pool = ThreadPoolExecutor(max_workers=12)
         self.lock = threading.Lock()
         self.latest, self.at = None, 0.0
@@ -1283,6 +1403,7 @@ class Status:
                 latest["logos"] = self.logos.available(
                     [cid for cid, *_ in TILES if cid in latest["checks"]], self.pool)
                 self.latest, self.at = latest, time.monotonic()
+            self.latest["update"] = self.updates.info
             return self.latest
 
     def watch(self):
@@ -1295,6 +1416,7 @@ class Status:
                 for kind, cid, c in watcher.update(self.get()["checks"], time.time()):
                     if not push_event(settings, kind, cid, c) and kind == "down":
                         watcher.retry(cid)
+                self.updates.poll(settings, time.time())
             except Exception as e:  # keep watching whatever happens
                 print(f"watch: {e!r}", file=sys.stderr, flush=True)
 
@@ -1421,7 +1543,8 @@ def main(argv=None):
     parser.add_argument("--once", action="store_true", help="print the status as JSON and exit")
     args = parser.parse_args(argv)
 
-    Handler.status = Status(args.config, args.arr_dir)
+    # StateDirectory= in the unit (what was pushed about updates); run by hand: none
+    Handler.status = Status(args.config, args.arr_dir, os.environ.get("STATE_DIRECTORY"))
     if args.once:
         print(json.dumps(Handler.status.get(), indent=1))
         return 0

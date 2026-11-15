@@ -130,11 +130,15 @@ repo_version() {
     printf '%s, %s' "$v" "$(git -C "$REPO" log -1 --format=%cd --date=format-local:'%Y-%m-%d %H:%M')"
 }
 
-# A copy of the program SRC with the version written into its VERSION = "" line, to install.
+# A copy of the program SRC with the version written into its VERSION = "" line, to install;
+# also the commit and the checkout into COMMIT = "" / REPO_DIR = "" (the start page's update
+# check), where it has them.
 stamped() {
     local out
     out=$TMP/$(basename "$1")
-    sed "s|^VERSION = \"\".*|VERSION = \"$TB_VERSION\"|" "$1" >"$out"
+    sed -e "s|^VERSION = \"\".*|VERSION = \"$TB_VERSION\"|" \
+        -e "s|^COMMIT = \"\".*|COMMIT = \"$TB_COMMIT\"|" \
+        -e "s|^REPO_DIR = \"\".*|REPO_DIR = \"$REPO\"|" "$1" >"$out"
     printf '%s' "$out"
 }
 
@@ -2175,6 +2179,7 @@ main() {
     TMP=$(mktemp -d -t torrent-box-setup.XXXXXX)
     trap 'rm -rf "$TMP"' EXIT
     TB_VERSION=$(repo_version)
+    TB_COMMIT=$(git -C "$REPO" rev-parse -q --verify HEAD 2>/dev/null || true)
     banner
     if (( DRY_RUN )); then
         echo "Dry run: showing what would be done; nothing is changed."

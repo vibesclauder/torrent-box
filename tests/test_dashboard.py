@@ -1,3 +1,4 @@
+import base64
 import http.client
 import json
 import re
@@ -798,3 +799,114 @@ class PageTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def fake_github(ahead, version="1.1 rev 0", version_ahead=None):
+    """GitHub's API for check_update: BRANCH is `ahead` commits past the installed one, and
+    `version_ahead` (default: all of them) past the commit that last changed VERSION."""
+    commits = [{"sha": f"sha{i}", "commit": {"message": f"Change {i}\n\nbody",
+                                             "committer": {"date": "2026-11-20T09:30:00Z"}}}
+               for i in range(1, ahead + 1)]
+
+    def fetch(path):
+        if path.startswith("compare/installed..."):
+            return {"ahead_by": ahead, "commits": commits,
+                    "html_url": "https://github.com/x/compare/installed...main"}
+        if path.startswith("commits?"):
+            return [{"sha": "base"}]
+        if path.startswith("contents/VERSION"):
+            return {"content": base64.b64encode(version.encode() + b"\n").decode()}
+        if path.startswith("compare/base..."):
+            return {"ahead_by": ahead if version_ahead is None else version_ahead}
+        raise AssertionError(path)
+    return fetch
+
+
+class UpdateTest(unittest.TestCase):
+    def test_check(self):
+        self.assertIsNone(db.check_update("", fake_github(3)))  # not installed from git
+        self.assertEqual(db.check_update("installed", fake_github(0)), {"commits": 0})
+        info = db.check_update("installed", fake_github(3, version_ahead=2))
+        when = time.strftime("%Y-%m-%d %H:%M", time.localtime(1795167000))
+        self.assertEqual(info["version"], f"1.1 rev 2, {when}")
+        self.assertEqual((info["commits"], info["head"]), (3, "sha3"))
+        self.assertEqual(info["subjects"], ["Change 3", "Change 2", "Change 1"])  # newest first
+        self.assertEqual(info["url"], "https://github.com/x/compare/installed...main")
+        many = db.check_update("installed", fake_github(9))
+        self.assertEqual(len(many["subjects"]), db.UPDATE_SUBJECTS)
+        odd = db.check_update("installed", fake_github(1, version="2.0"))
+        self.assertTrue(odd["version"].startswith("2.0, "))
+
+    def test_command_names_the_checkout(self):
+        with mock.patch.object(db, "REPO_DIR", "/home/me/torrent-box"), \
+                mock.patch("os.path.expanduser", lambda p: "/home/me"):
+            self.assertEqual(db.update_command(), "cd ~/torrent-box && git pull && ./setup.sh")
+        with mock.patch.object(db, "REPO_DIR", "/opt/tb"):
+            self.assertEqual(db.update_command(), "cd /opt/tb && git pull && ./setup.sh")
+
+    def test_push_once_per_head_at_most_daily(self):
+        with FakeServer() as server, tempfile.TemporaryDirectory() as tmp:
+            s = db.load_settings(write_config(Path(tmp), server.base_url))
+            state = Path(tmp) / "state"
+            state.mkdir()
+            ahead = [2]
+            check = lambda: db.check_update("installed", fake_github(ahead[0]))  # noqa: E731
+            u = db.Updates(state, check)
+            with mock.patch("sys.stderr"), mock.patch.object(db, "VERSION", "1.1 rev 0, x"):
+                u.poll(s, 1000)
+                self.assertEqual(len(server.pushes), 1)
+                push = server.pushes[0]
+                self.assertTrue(push["title"].startswith("torrent-box 1.1 rev 2, "))
+                self.assertIn("2 new commits (you have 1.1 rev 0, x):\n• Change 2\n• Change 1",
+                              push["message"])
+                self.assertIn("git pull && ./setup.sh", push["message"])
+                self.assertEqual(push["click"], "https://github.com/x/compare/installed...main")
+                u.poll(s, 1060)  # not due yet
+                u.poll(s, 1000 + db.UPDATE_EVERY)  # due, same head
+                self.assertEqual(len(server.pushes), 1)
+                ahead[0] = 3  # a new commit, but the last push is less than a day old
+                u.poll(s, 1000 + 2 * db.UPDATE_EVERY)
+                self.assertEqual(len(server.pushes), 1)
+                self.assertEqual(u.info["commits"], 3)  # the page has it already
+                u.poll(s, 1000 + 4 * db.UPDATE_EVERY)
+                self.assertEqual(len(server.pushes), 2)
+                # a restart remembers what was pushed
+                again = db.Updates(state, check)
+                again.poll(s, 1000 + 9 * db.UPDATE_EVERY)
+                self.assertEqual(len(server.pushes), 2)
+
+    def test_failures(self):
+        with FakeServer() as server, tempfile.TemporaryDirectory() as tmp:
+            s = db.load_settings(write_config(Path(tmp), server.base_url))
+
+            def offline():
+                raise urllib.error.URLError("no network")
+
+            u = db.Updates(None, offline)
+            with mock.patch("sys.stderr"):
+                u.poll(s, 0)
+            self.assertEqual((u.info, u.due), (None, db.UPDATE_RETRY))
+            u.check = lambda: db.check_update("installed", fake_github(1))
+            server.ntfy_down = True
+            with mock.patch("sys.stderr"):
+                u.poll(s, db.UPDATE_RETRY)
+            self.assertEqual(u.info["commits"], 1)  # shown, but the push is tried again
+            server.ntfy_down = False
+            with mock.patch("sys.stderr"):
+                u.poll(s, db.UPDATE_RETRY + db.UPDATE_EVERY)
+            self.assertEqual(len(server.pushes), 1)
+
+    def test_banner(self):
+        status = {"time": 0, "hostname": "box", "storage_root": "/mnt/storage",
+                  "checks": {"transmission": db.result(db.OK, "fine")}}
+        for update in (None, {"commits": 0}):
+            self.assertNotIn('class="banner', db.render({**status, "update": update}, "box"))
+        update = {"commits": 7, "head": "h", "version": "1.1 rev 7, 2026-11-20 10:30",
+                  "subjects": ["Fix <b>this</b>", "Add that"], "url": "https://github.com/x/c"}
+        page = db.render({**status, "update": update}, "box")
+        self.assertIn('class="banner update"', page)
+        self.assertIn("Update available: torrent-box 1.1 rev 7, 2026-11-20 10:30", page)
+        self.assertIn("<li>Fix &lt;b&gt;this&lt;/b&gt;</li>", page)
+        self.assertIn("<li>… and 5 more</li>", page)
+        self.assertIn("git pull &amp;&amp; ./setup.sh", page)
+        self.assertIn("All systems go", page)  # an update isn't a problem

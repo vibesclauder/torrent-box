@@ -84,7 +84,8 @@ system files are only rewritten (and services only restarted) when something cha
 for every commit after the one that last changed `VERSION`, and when the checked-out commit
 was made (without git history, as in a downloaded archive, just `VERSION`). setup.sh shows
 it under its banner and writes it into what it installs, so the start page's footer and the
-test push say which one is running. Updating: `git pull && ./setup.sh`.
+test push say which one is running, along with the commit, which the start page compares
+with GitHub's `main` to tell you about updates. Updating: `git pull && ./setup.sh`.
 
 ## Start page
 
@@ -101,6 +102,13 @@ It also **pushes** what stays wrong for 10 minutes (an app down, the feed failin
 logged out, the system disk full...), once, and again when it's fine. Not what already
 pushes on its own: the storage disk (rss2transmission), Prowlarr's health and nCore (Prowlarr),
 the disk's health (smartd); for those only when the app itself is down.
+
+It also tells you about **updates**: every 6 hours it asks GitHub whether `main` has moved on
+since the commit setup.sh installed from. If so, a banner at the top shows the new version,
+the latest changes and the command to update (`cd ~/torrent-box && git pull && ./setup.sh`),
+and one push says the same (at most one a day, however many commits land). It needs nothing
+but GitHub's public API (no account, no token); installs not made from a git checkout don't
+check.
 
 With Prowlarr, the "nCore search" row says whether Prowlarr is logged in to nCore, and has a
 box for a fresh **2FA code** only while one is needed (its session has ended, or the indexer is
