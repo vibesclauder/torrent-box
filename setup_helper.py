@@ -465,8 +465,11 @@ def ensure_login(api, user, password, force=False):
 
 HUN_FORMAT = {"name": "HUN", "includeCustomFormatWhenRenaming": False, "specifications": [
     {"name": "HUN in the release name", "implementation": "ReleaseTitleSpecification",
-     "negate": False, "required": False, "fields": [{"name": "value", "value": r"\bHUN\b"}]}]}
+     "negate": False, "required": False,
+     # "2xHUN" / "4xHUN": that many Hungarian audio tracks
+     "fields": [{"name": "value", "value": r"(\b|\dx)HUN\b"}]}]}
 HUN_SCORE = 100
+OLD_HUN_PATTERNS = (r"\bHUN\b",)  # earlier versions' pattern: updated, yours are kept
 
 
 def ensure_hun_format(api, state):
@@ -477,9 +480,16 @@ def ensure_hun_format(api, state):
     done = state.setdefault("hun_scored", [])
     fmt = next((f for f in api.call("GET", "customformat") if f.get("name") == HUN_FORMAT["name"]),
                None)
-    if fmt is not None and api.name in done:
-        return "ok"
     result = "ok"
+    pattern = HUN_FORMAT["specifications"][0]["fields"][0]["value"]
+    for spec in (fmt or {}).get("specifications", []):
+        for f in spec.get("fields", []):
+            if f.get("name") == "value" and f.get("value") in OLD_HUN_PATTERNS:
+                f["value"], result = pattern, "pattern updated"
+    if result != "ok":
+        api.call("PUT", f"customformat/{fmt['id']}", fmt)
+    if fmt is not None and api.name in done:
+        return result
     if fmt is None:
         fmt, result = api.call("POST", "customformat", HUN_FORMAT), "added"
     for profile in api.call("GET", "qualityprofile"):

@@ -516,7 +516,7 @@ class FakeArr:
         kind, _, rest = path.partition("/")
         items = self.items.setdefault(kind, [])
         if method == "POST" and kind == "customformat":  # the app adds it to every profile
-            body = dict(body, id=len(items) + 1)
+            body = dict(json.loads(json.dumps(body)), id=len(items) + 1)  # sent as JSON
             items.append(body)
             for profile in self.items["qualityprofile"]:
                 profile["formatItems"].insert(0, {"format": body["id"], "name": body["name"],
@@ -601,7 +601,7 @@ class ArrConnectTest(unittest.TestCase):
         # HUN preferred in every profile of Sonarr and Radarr
         for api in (s, r):
             fmt = api.items["customformat"][0]
-            self.assertEqual(fmt["specifications"][0]["fields"][0]["value"], r"\bHUN\b")
+            self.assertEqual(fmt["specifications"][0]["fields"][0]["value"], r"(\b|\dx)HUN\b")
             for profile in api.items["qualityprofile"]:
                 self.assertEqual(profile["formatItems"],
                                  [{"format": fmt["id"], "name": "HUN", "score": sh.HUN_SCORE}])
@@ -729,6 +729,31 @@ class ArrConnectTest(unittest.TestCase):
         self.connect(apis)
         self.assertEqual(apis["sonarr"].items["qualityprofile"][0]["formatItems"][0]["score"], 500)
         self.assertEqual(apis["sonarr"].items["qualityprofile"][1]["formatItems"][0]["score"], 0)
+
+    def test_hun_pattern(self):
+        pattern = re.compile(sh.HUN_FORMAT["specifications"][0]["fields"][0]["value"], re.I)
+        for name in ("Raw.Deal.1986.1080p.BluRay.DTS.x264.HuN-HyperX",
+                     "The.Untouchables.1987.BluRay.1080p.DD2.0.H264.2xHUN-GuRF",
+                     "Cobra.1986.MULTi.BluRay.1080p.DD 5.1.x264.4xHUN-GuRF",
+                     "I.Due.Superpiedi.1977.BluRay.720p.Hun.Eng.Ita.x264-DenZo"):
+            self.assertRegex(name, pattern)
+        for name in ("Hunters.S01E01.1080p.WEB-DL", "Code.3.2025.1080p.AMZN.WEB-DL-BYNDR",
+                     "The.Hunt.2020.1080p.BluRay.x264"):
+            self.assertNotRegex(name, pattern)
+
+    def test_hun_old_pattern_is_updated_yours_kept(self):
+        s = FakeArr("sonarr")
+        sh.ensure_hun_format(s, self.state)
+
+        def value():
+            return s.items["customformat"][0]["specifications"][0]["fields"][0]
+
+        value()["value"] = r"\bHUN\b"  # made by an earlier version
+        self.assertEqual(sh.ensure_hun_format(s, self.state), "pattern updated")
+        self.assertEqual(value()["value"], r"(\b|\dx)HUN\b")
+        value()["value"] = r"\bHUNGARIAN\b"  # yours
+        self.assertEqual(sh.ensure_hun_format(s, self.state), "ok")
+        self.assertEqual(value()["value"], r"\bHUNGARIAN\b")
 
     def test_hun_score_left_halfway_is_finished(self):
         s = FakeArr("sonarr")

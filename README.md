@@ -295,7 +295,7 @@ Setup also does what you'd otherwise click through, with the Transmission login 
   (hardlinked, so it costs nothing). When a release is replaced or deleted in Sonarr/Radarr/
   Whisparr, rss2transmission removes its download once nCore's rule is met (ratio 2, or
   50 h + 0.4 h per GB; `[cleanup]` in config.ini).
-- **HUN:** a custom format in Sonarr and Radarr matching `HUN` in the release name, scored
+- **HUN:** a custom format in Sonarr and Radarr matching `HUN` (or `2xHUN`, …) in the release name, scored
   +100 in every quality profile, so a Hungarian release wins over an equal English one.
 - **Seerr:** signed in with Jellyfin, movie and show libraries enabled, Sonarr and Radarr
   added (HD-1080p profile if there is one). If that fails, setup warns and Seerr's own wizard
