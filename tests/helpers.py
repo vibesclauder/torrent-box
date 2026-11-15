@@ -52,6 +52,7 @@ class FakeServer:
         self.torrents = {}         # ncore_id -> (filename, bytes)
         self.added = {}            # info hash -> {"download-dir": ..., "metainfo": ...}
         self.tr_torrents = []      # what torrent-get returns; torrent-add appends here
+        self.removed = []          # (hash, delete-local-data) of each torrent-remove
         self.pushes = []           # ntfy messages received (decoded JSON)
         self.ntfy_down = False     # True -> ntfy answers 500
         self.rpc_auth = "Basic " + base64.b64encode(f"{rpc_user}:{rpc_password}".encode()).decode()
@@ -120,6 +121,12 @@ class FakeServer:
                     reply = {key: {"hashString": info_hash, "id": 1, "name": "x"}}
                 elif req["method"] == "torrent-get":
                     reply = {"torrents": server.tr_torrents}
+                elif req["method"] == "torrent-remove":
+                    for info_hash in args["ids"]:
+                        server.removed.append((info_hash, args.get("delete-local-data")))
+                    server.tr_torrents = [t for t in server.tr_torrents
+                                          if t["hashString"] not in args["ids"]]
+                    reply = {}
                 else:
                     reply = {}
                 self._send(200, json.dumps({"result": "success", "arguments": reply}).encode())

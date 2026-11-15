@@ -539,7 +539,8 @@ def ensure_ncore(prowlarr, user, password, code, state):
     """The nCore indexer (Cardigann definition "ncore"). Added once; an existing one that
     worked is never touched, since saving it again would log in with an old 2FA code. One
     whose first login failed is switched on with this code. No seed limits: Transmission
-    keeps seeding, which meets nCore's rule (ratio 1.0 or 48 h + 0.4 h/GB).
+    keeps seeding, and rss2transmission removes what the library let go of once nCore's rule
+    is met ([cleanup] in config.ini).
 
     Added switched off, then switched on with the code: Prowlarr only keeps the session
     cookies of a login made for a saved indexer (one with an id), so logging in while adding

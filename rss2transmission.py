@@ -7,8 +7,10 @@ One run, normally started every few minutes by a systemd timer:
      folder from its nCore category, add it to Transmission, archive the .torrent
   3. do the same for .torrent files dropped by hand into the watch dir
   4. ask Transmission which torrents finished downloading since last time
-  5. check free space on the storage disk
-  6. push a summary to ntfy (added / downloaded / problems)
+  5. with Sonarr/Radarr/Whisparr: remove their downloads the library no longer has (replaced
+     or deleted there), with the files, once nCore's seeding rule is met
+  6. check free space on the storage disk
+  7. push a summary to ntfy (added / downloaded / removed / problems)
 A torrent is only marked seen once Transmission accepted it, and a finished download only
 counts as announced once ntfy accepted the push, so failures retry next run.
 The very first run only records what is already in the feed and already finished in
@@ -51,6 +53,14 @@ DEFAULT_SHOW_FOLDERS = "hdser_hun, hdser, xvidser_hun, xvidser, dvdser_hun, dvds
 # owns the show folders there: it imports any file it finds in one in place, and deletes it on
 # an upgrade even while it's still seeding. So no show folders in them then.
 SONARR_ROUTES = ("hdser_hun", "hdser")
+# With [setup] arr = yes: where Sonarr, Radarr and Whisparr download to, under the storage root
+# (setup.sh's arr-connect: <downloads>/series, /movies, /xxx). From there they hardlink the
+# files into the library, so a torrent here holds no disk space of its own until the library
+# lets go of its files.
+ARR_DOWNLOADS = "downloads"
+VIDEO_EXTENSIONS = frozenset((".mkv", ".mp4", ".m4v", ".avi", ".ts", ".m2ts", ".wmv", ".mov",
+                              ".mpg", ".mpeg", ".webm"))
+SAMPLE = re.compile(r"\bsample\b", re.I)
 
 log = logging.getLogger("rss2transmission")
 
@@ -87,6 +97,13 @@ class Config:
     routes: dict
     misc_dir: str
     show_categories: frozenset
+    arr: bool
+    remove_unused: bool
+    seed_ratio: float
+    seed_hours: float
+    seed_hours_per_gb: float
+    notify_removed: bool
+    priority_removed: int
     feed_url: str
     rpc_user: str
     rpc_password: str
@@ -146,7 +163,8 @@ def load_config(config_path, secrets_path=None):
     misc_dir = routes.pop("misc_dir", "MISC")
     show_categories = frozenset(re.split(r"[\s,]+", get(
         conf, config_path, "general", "show_folders", DEFAULT_SHOW_FOLDERS).strip())) - {""}
-    if get(conf, config_path, "setup", "arr", "").strip().lower() == "yes":
+    arr = get(conf, config_path, "setup", "arr", "").strip().lower() == "yes"
+    if arr:
         show_categories -= set(SONARR_ROUTES)
 
     return Config(
@@ -166,6 +184,13 @@ def load_config(config_path, secrets_path=None):
         routes=routes,
         misc_dir=misc_dir,
         show_categories=show_categories,
+        arr=arr,
+        remove_unused=getbool("cleanup", "remove_unused", True),
+        seed_ratio=getnum("cleanup", "seed_ratio", 2.0, float),
+        seed_hours=getnum("cleanup", "seed_hours", 50, float),
+        seed_hours_per_gb=getnum("cleanup", "seed_hours_per_gb", 0.4, float),
+        notify_removed=getbool("ntfy", "notify_removed", True),
+        priority_removed=getpriority("priority_removed", "low"),
         feed_url=get(secrets, secrets_path, "secrets", "feed_url").strip(),
         rpc_user=get(secrets, secrets_path, "secrets", "rpc_user"),
         rpc_password=get(secrets, secrets_path, "secrets", "rpc_password"),
@@ -321,6 +346,11 @@ CREATE TABLE IF NOT EXISTS announced (
     name         TEXT,
     announced_at TEXT
 );
+CREATE TABLE IF NOT EXISTS imported (
+    info_hash    TEXT PRIMARY KEY,
+    name         TEXT,
+    imported_at  TEXT
+);
 CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
     value TEXT
@@ -336,6 +366,13 @@ class State:
         if readonly:
             if path.exists():
                 self.db = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)
+                # a file from an older version lacks the newer tables: empty ones for this run
+                present = {row[0] for row in self.db.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'")}
+                for statement in SCHEMA.split(";"):
+                    table = re.search(r"CREATE TABLE IF NOT EXISTS (\w+)", statement)
+                    if table and table.group(1) not in present:
+                        self.db.execute(statement.replace("CREATE TABLE", "CREATE TEMP TABLE"))
             else:
                 self.db = sqlite3.connect(":memory:")
                 self.db.executescript(SCHEMA)
@@ -373,6 +410,17 @@ class State:
     def mark_announced(self, info_hash, name):
         self.db.execute("INSERT OR REPLACE INTO announced VALUES (?, ?, ?)",
                         (info_hash, name, now()))
+
+    def is_imported(self, info_hash):
+        return self.db.execute("SELECT 1 FROM imported WHERE info_hash = ?",
+                               (info_hash,)).fetchone() is not None
+
+    def mark_imported(self, info_hash, name):
+        self.db.execute("INSERT OR REPLACE INTO imported VALUES (?, ?, ?)",
+                        (info_hash, name, now()))
+
+    def forget_imported(self, info_hash):
+        self.db.execute("DELETE FROM imported WHERE info_hash = ?", (info_hash,))
 
     def warning_due(self, key):
         last = self.get_meta(key)
@@ -442,12 +490,17 @@ class Transmission:
         return "added", args.get("torrent-added", {}).get("hashString")
 
 
-    def finished(self):
+    def finished(self, extra_fields=()):
         """Torrents that are fully downloaded: list of dicts with hashString, name,
-        downloadDir, sizeWhenDone."""
+        downloadDir, sizeWhenDone and the extra_fields asked for."""
         args = self.call("torrent-get", {"fields": [
-            "hashString", "name", "percentDone", "downloadDir", "sizeWhenDone"]})
+            "hashString", "name", "percentDone", "downloadDir", "sizeWhenDone",
+            *extra_fields]})
         return [t for t in args.get("torrents", []) if t.get("percentDone", 0) >= 1]
+
+    def remove(self, info_hash):
+        """Remove a torrent and delete its files."""
+        self.call("torrent-remove", {"ids": [info_hash], "delete-local-data": True})
 
 
 ### ntfy
@@ -529,6 +582,7 @@ class Added:
 class Report:
     added: list = field(default_factory=list)
     completed: list = field(default_factory=list)
+    removed: list = field(default_factory=list)
     errors: list = field(default_factory=list)
     seeded: int = 0
     seeded_completions: int = 0
@@ -719,6 +773,90 @@ def process_completions(cfg, state, tr, ntfy, report, dry_run, seed):
                 state.mark_announced(t["hashString"], t.get("name"))
 
 
+def file_links(torrent):
+    """Hardlink count of each of a torrent's files, or None if one can't be read (gone, or
+    the disk is away): then nothing is decided about the torrent this run."""
+    links = {}
+    for f in torrent.get("files", []):
+        try:
+            links[f["name"]] = os.stat(Path(torrent["downloadDir"]) / f["name"]).st_nlink
+        except OSError:
+            return None
+    return links
+
+
+def imported(links):
+    """The app has hardlinked every video file (samples aside) into the library."""
+    videos = [n for name, n in links.items()
+              if Path(name).suffix.lower() in VIDEO_EXTENSIONS and not SAMPLE.search(name)]
+    return bool(videos) and all(n > 1 for n in videos)
+
+
+def seeding_done(cfg, t):
+    """nCore's rule as configured: the ratio, or the hours (more for bigger torrents)."""
+    hours = cfg.seed_hours + cfg.seed_hours_per_gb * t.get("sizeWhenDone", 0) / 1e9
+    return (t.get("uploadRatio", 0) >= cfg.seed_ratio
+            or t.get("secondsSeeding", 0) >= hours * 3600)
+
+
+def process_removals(cfg, state, tr, ntfy, report, dry_run):
+    """Sonarr/Radarr/Whisparr downloads: remember which ones were imported, and remove those
+    the library has let go of since (every file back to one link: replaced by another
+    release, or deleted) once seeding is done. A download that was never imported (failed,
+    or waiting for a manual import) is never removed."""
+    root = cfg.storage_root / ARR_DOWNLOADS
+    try:
+        finished = tr.finished(["files", "uploadRatio", "secondsSeeding"])
+    except (TransmissionUnavailable, TorrentRejected) as e:
+        report.error(f"could not ask transmission for seeding downloads: {e}")
+        return
+    due = []
+    for t in finished:
+        if not Path(t.get("downloadDir", "")).is_relative_to(root):
+            continue
+        links = file_links(t)
+        if not links:
+            continue
+        if imported(links):
+            if not dry_run and not state.is_imported(t["hashString"]):
+                state.mark_imported(t["hashString"], t.get("name"))
+        elif (all(n == 1 for n in links.values()) and state.is_imported(t["hashString"])
+              and seeding_done(cfg, t)):
+            due.append(t)
+
+    for t in due:
+        if dry_run:
+            log.info("[dry-run] would remove %s", t.get("name"))
+            continue
+        try:
+            tr.remove(t["hashString"])
+        except TorrentRejected as e:
+            report.error(f"could not remove {t.get('name')}: {e}")
+            continue
+        except TransmissionUnavailable as e:
+            report.error(f"could not remove {t.get('name')}: {e}")
+            break
+        state.forget_imported(t["hashString"])
+        log.info("removed %s (ratio %.2f, seeded %.0f h)", t.get("name"),
+                 t.get("uploadRatio", 0), t.get("secondsSeeding", 0) / 3600)
+        report.removed.append(t)
+    if not report.removed or not cfg.notify_removed:
+        return
+
+    def details(t):
+        return (f"{human_size(t.get('sizeWhenDone', 0))} freed, ratio "
+                f"{max(t.get('uploadRatio', 0), 0):.2f}, seeded "
+                f"{t.get('secondsSeeding', 0) / 3600:.0f} h")
+
+    if len(report.removed) == 1:
+        title, message = f"Removed: {report.removed[0].get('name')}", details(report.removed[0])
+    else:
+        freed = sum(t.get("sizeWhenDone", 0) for t in report.removed)
+        title = f"{len(report.removed)} seeded downloads removed, {human_size(freed)} freed"
+        message = bullet_list([f"{t.get('name')} ({details(t)})" for t in report.removed])
+    push(ntfy, report, dry_run, title, message, cfg.priority_removed, ["wastebasket"])
+
+
 def check_disk(cfg, state, ntfy, report, dry_run):
     try:
         usage = shutil.disk_usage(cfg.storage_root)
@@ -748,6 +886,8 @@ def run(cfg, state, tr, ntfy, dry_run=False, catch_up=False):
     if transmission_ok:
         seed = catch_up or state.get_meta("completions_initialized") is None
         process_completions(cfg, state, tr, ntfy, report, dry_run, seed)
+        if mounted and cfg.arr and cfg.remove_unused:
+            process_removals(cfg, state, tr, ntfy, report, dry_run)
     if mounted:
         check_disk(cfg, state, ntfy, report, dry_run)
     return report
@@ -816,8 +956,8 @@ def main(argv=None):
             state.close()
 
     seeded = report.seeded + report.seeded_completions
-    log.info("done: %d added, %d finished, %d errors%s", len(report.added),
-             len(report.completed), len(report.errors),
+    log.info("done: %d added, %d finished, %d removed, %d errors%s", len(report.added),
+             len(report.completed), len(report.removed), len(report.errors),
              f", {seeded} marked as already handled" if seeded else "")
     return 1 if report.errors else 0
 

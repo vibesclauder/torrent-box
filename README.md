@@ -291,8 +291,10 @@ Setup also does what you'd otherwise click through, with the Transmission login 
 - **Prowlarr ↔ Sonarr/Radarr**, so indexers are synced to them, and the HD series/movie
   folders from `[routes]` as their root folders (Seerr requests go to the Hungarian ones).
 - **nCore** in Prowlarr, with your nCore login (asked once, kept in `secrets.ini`). No seed
-  limits: Transmission keeps seeding, which meets nCore's rule (ratio 1.0, or 48 h + 0.4 h
-  per GB).
+  limits in Transmission: downloads keep seeding while the library has their files
+  (hardlinked, so it costs nothing). When a release is replaced or deleted in Sonarr/Radarr/
+  Whisparr, rss2transmission removes its download once nCore's rule is met (ratio 2, or
+  50 h + 0.4 h per GB; `[cleanup]` in config.ini).
 - **HUN:** a custom format in Sonarr and Radarr matching `HUN` in the release name, scored
   +100 in every quality profile, so a Hungarian release wins over an equal English one.
 - **Seerr:** signed in with Jellyfin, movie and show libraries enabled, Sonarr and Radarr
@@ -442,9 +444,12 @@ One run:
    another show). See `show_folders`,
 3. does the same for `.torrent` files dropped into the watch dir by hand,
 4. asks Transmission which downloads finished since the last run,
-5. checks free space on the storage disk,
-6. pushes a summary to your phone via [ntfy](https://ntfy.sh): torrents added, downloads
-   finished, and (at most daily) disk-full / disk-not-mounted warnings.
+5. with Sonarr/Radarr/Whisparr: removes their downloads that the library no longer has
+   (replaced by a better release, or deleted there), files included, once seeding is done
+   (see `[cleanup]`),
+6. checks free space on the storage disk,
+7. pushes a summary to your phone via [ntfy](https://ntfy.sh): torrents added, downloads
+   finished, downloads removed, and (at most daily) disk-full / disk-not-mounted warnings.
 
 Torrents are only marked seen once Transmission accepted them, and finished downloads only
 count as announced once ntfy accepted the push, so anything that failed is retried on the

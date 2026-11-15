@@ -54,7 +54,7 @@ torrent-box/
     arr-update                  # pull, up -d, push which apps got a new image
   tests/
     helpers.py                  # fake nCore + Transmission server, config writer
-    test_routing.py  test_feed.py  test_rpc.py  test_run.py  test_completions.py  test_notify.py
+    test_routing.py  test_feed.py  test_rpc.py  test_run.py  test_completions.py  test_notify.py  test_cleanup.py
     test_setup_helper.py  test_dashboard.py
     fixtures/feed.xml           # sanitised sample feed (no passkey)
 ```
@@ -91,11 +91,20 @@ Each run (the program always does one run and exits; the timer repeats it), in o
 4. **Completions:** RPC `torrent-get` (hashString, name, percentDone, doneDate, downloadDir,
    sizeWhenDone). Every finished torrent whose hash is not in `announced` → notify, then insert.
    Insert only after ntfy accepted it → failed sends retry next run.
-5. **Disk space:** `shutil.disk_usage(storage_root)`, percent computed and rounded up like
+5. **Cleanup** (`[setup] arr = yes`, `[cleanup] remove_unused = yes`): RPC `torrent-get`
+   with files, uploadRatio, secondsSeeding, for the finished torrents under
+   `<storage_root>/downloads` (the apps' download folders) only. Every video file (samples
+   aside) hardlinked (st_nlink > 1) → hash into `imported`. A torrent in `imported` whose
+   files are all back to one link (the library let go: upgrade or delete) and that met
+   `seed_ratio`, or `seed_hours + seed_hours_per_gb × GB` of seeding → `torrent-remove` with
+   `delete-local-data`, one low-priority push for the run. A file that can't be stat'ed →
+   nothing decided this run. Never imported (failed / manual import pending) → never removed.
+   Skipped when the disk isn't mounted.
+6. **Disk space:** `shutil.disk_usage(storage_root)`, percent computed and rounded up like
    `df`'s Use%; at/above `disk_warn_percent` → warning push, at most once per 24 h while it
    lasts (timestamp in state; cleared when it drops below, so the next crossing warns at once).
    Same rate-limiting for the mount warning. Skipped when the disk isn't mounted.
-6. **Notify:** batch per run — one "Added" push listing new torrents, one "Downloaded" push
+7. **Notify:** batch per run — one "Added" push listing new torrents, one "Downloaded" push
    listing completions (with sizes), separate high-priority push for disk/mount problems.
    Sent as JSON to the ntfy server root (not via headers), so non-ASCII names survive. Lists
    longer than 20 lines end with "… and N more". No `ntfy_topic` → notifications off.
