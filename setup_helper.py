@@ -769,12 +769,13 @@ def cmd_ncore_status(args):
 JELLYFIN = "http://localhost:8096"
 JF_CLIENT = 'MediaBrowser Client="torrent-box-setup", Device="setup", DeviceId="torrent-box-setup", Version="1.0"'
 
-# (library, collection type, [routes] codes, metadata language, country): README's layout
+# (library, collection type, [routes] codes, metadata language, country): README's layout.
+# One library for all movies and one for all series, Hungarian and English folders alike:
+# Seerr files every request into the Hungarian ones anyway, and titles and descriptions come
+# in Hungarian where TMDB has them (English otherwise).
 JELLYFIN_LIBRARIES = [
-    ("Filmek", "movies", ("hd_hun", "xvid_hun"), "hu", "HU"),
-    ("Movies", "movies", ("hd", "xvid"), "en", "US"),
-    ("Sorozatok", "tvshows", ("hdser_hun", "xvidser_hun"), "hu", "HU"),
-    ("Series", "tvshows", ("hdser", "xvidser"), "en", "US"),
+    ("Filmek", "movies", ("hd_hun", "hd", "xvid_hun", "xvid"), "hu", "HU"),
+    ("Sorozatok", "tvshows", ("hdser_hun", "hdser", "xvidser_hun", "xvidser"), "hu", "HU"),
     ("Music", "music", ("mp3_hun", "mp3", "lossless_hun", "lossless"), "", ""),
 ]
 

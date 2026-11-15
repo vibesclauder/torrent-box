@@ -947,11 +947,13 @@ class JellyfinSetupTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             libs = sh.jellyfin_libraries(self.config(tmp))
         self.assertEqual([(n, t) for n, t, *_ in libs], [
-            ("Filmek", "movies"), ("Movies", "movies"), ("Sorozatok", "tvshows"),
-            ("Series", "tvshows"), ("Music", "music")])
-        self.assertEqual(libs[0][2], ["/mnt/storage/MOVIES/HD/HU", "/mnt/storage/MOVIES/SD/HU"])
+            ("Filmek", "movies"), ("Sorozatok", "tvshows"), ("Music", "music")])
+        self.assertEqual(libs[0][2], ["/mnt/storage/MOVIES/HD/HU", "/mnt/storage/MOVIES/HD/EN",
+                                      "/mnt/storage/MOVIES/SD/HU", "/mnt/storage/MOVIES/SD/EN"])
+        self.assertEqual(libs[1][2], ["/mnt/storage/SERIES/HD/HU", "/mnt/storage/SERIES/HD/EN",
+                                      "/mnt/storage/SERIES/SD/HU", "/mnt/storage/SERIES/SD/EN"])
         self.assertEqual(libs[0][3:], ("hu", "HU"))
-        self.assertEqual(libs[4][2], ["/mnt/storage/MUSIC"])  # the top folder, once
+        self.assertEqual(libs[2][2], ["/mnt/storage/MUSIC"])  # the top folder, once
 
     def test_wizard(self):
         fake = FakeJellyfin()
@@ -961,8 +963,8 @@ class JellyfinSetupTest(unittest.TestCase):
         self.assertTrue(fake.completed)
         self.assertEqual(fake.calls[-1], ("POST", "/Startup/Complete"))
         names = [n for n, _, _ in fake.libraries]
-        self.assertEqual(names, ["Filmek", "Movies", "Sorozatok", "Series", "Music"])
-        self.assertEqual(fake.libraries[2][2][1]["PreferredMetadataLanguage"], "hu")
+        self.assertEqual(names, ["Filmek", "Sorozatok", "Music"])
+        self.assertEqual(fake.libraries[1][2][1]["PreferredMetadataLanguage"], "hu")
         self.assertIn("first-run wizard completed", out)
 
     def test_set_up_jellyfin_is_left_alone(self):

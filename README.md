@@ -151,11 +151,17 @@ up is left alone). By hand: open `http://<box>:8096/`, create the admin user, an
 
 | Library | Type | Folders |
 |---|---|---|
-| Filmek | Movies | `MOVIES/HD/HU`, `MOVIES/SD/HU` |
-| Movies | Movies | `MOVIES/HD/EN`, `MOVIES/SD/EN` |
-| Sorozatok | Shows | `SERIES/HD/HU`, `SERIES/SD/HU` |
-| Series | Shows | `SERIES/HD/EN`, `SERIES/SD/EN` |
+| Filmek | Movies | `MOVIES/HD/HU`, `MOVIES/HD/EN`, `MOVIES/SD/HU`, `MOVIES/SD/EN` |
+| Sorozatok | Shows | `SERIES/HD/HU`, `SERIES/HD/EN`, `SERIES/SD/HU`, `SERIES/SD/EN` |
 | Music | Music | `MUSIC` |
+
+All movies in one library and all series in another, whatever their language: Seerr files
+requests into the Hungarian folders anyway, so English-only libraries would stay nearly empty.
+Both fetch metadata in Hungarian (English where TMDB has no Hungarian text). Older installs
+have separate Movies/Series libraries, which setup leaves as they are. To merge them by hand:
+remove the library in Jellyfin, add its folders to Filmek/Sorozatok, scan, then restart
+Jellyfin so the old library also disappears from the apps (and sync Seerr's libraries).
+Watch history stays, since the items keep their paths.
 
 Series are filed into a folder per show by rss2transmission (see below), which is the layout
 Jellyfin expects; it reads season and episode from the file names. Series downloaded before
