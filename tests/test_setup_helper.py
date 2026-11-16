@@ -239,10 +239,10 @@ class IniTest(unittest.TestCase):
                                    "arr_auto_update"]), (0, "\n"))
         new = sh.set_ini_values(text, "setup", {"media_server": "jellyfin", "samba": "yes",
                                                 "tailscale": "no", "download_mbps": "2000"})
-        self.assertTrue(new.endswith("\ndownload_mbps   = 2000\n"))
-        self.assertIn("\nmedia_server    = jellyfin\n", new)
-        self.assertIn("\nsamba           = yes\n", new)
-        self.assertIn("\ntailscale       = no\n", new)
+        self.assertRegex(new, r"\ndownload_mbps +=  ?2000\n$")   # lined up with the longest key
+        self.assertRegex(new, r"\nmedia_server +=  ?jellyfin\n")
+        self.assertRegex(new, r"\nsamba +=  ?yes\n")
+        self.assertRegex(new, r"\ntailscale +=  ?no\n")
         self.assertEqual(len(new.splitlines()), len(text.splitlines()))
 
     def test_media_server_added_to_old_config(self):
@@ -388,6 +388,18 @@ class MiscTest(unittest.TestCase):
         self.assertEqual(sh.serve_ports("{}"), [])
         self.assertEqual(sh.serve_ports(""), [])
         self.assertEqual(run_main(["serve-ports"], stdin=serving), (0, "443 80\n15055 5055\n"))
+
+    def test_tailscale_services(self):
+        serving = json.dumps({"Services": {
+            "svc:seerr": {"Web": {"seerr.t.ts.net:443": {"Handlers": {"/": {"Proxy": "http://127.0.0.1:5055"}}}}},
+            "svc:other": {"Web": {"other.t.ts.net:8080": {"Handlers": {"/": {"Proxy": "http://127.0.0.1:9"}}}}}}})
+        self.assertEqual(sh.serve_services(serving), [("seerr", 5055)])
+        self.assertEqual(run_main(["serve-services"], stdin=serving), (0, "seerr 5055\n"))
+        status = json.dumps({"Self": {"Tags": ["tag:server"], "CapMap": {
+            "service-host": [{"svc:seerr": ["100.1.2.3"], "svc:wiki": ["100.1.2.4"]}]}}})
+        self.assertEqual(sh.service_host(status), (["tag:server"], ["seerr", "wiki"]))
+        self.assertEqual(run_main(["service-host"], stdin=status), (0, "tag:server\nseerr wiki\n"))
+        self.assertEqual(run_main(["service-host"], stdin='{"Self": {}}'), (0, "-\n-\n"))
 
     def test_random_topic(self):
         topic = sh.random_topic()

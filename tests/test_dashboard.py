@@ -7,6 +7,7 @@ import tempfile
 import threading
 import time
 import unittest
+import unittest.mock
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
@@ -356,6 +357,27 @@ class NtfyCheckTest(unittest.TestCase):
         self.assertIn('<a href="https://box.tail1234.ts.net:12586/">', page)
         self.assertIn('href="http://box:5055/"', db.render(status, "box"))
         self.assertEqual(db.ntfy_link("https://ntfy.sh", "box", https=True), "https://ntfy.sh")
+
+    def test_links_to_tailscale_services(self):
+        tailnet = db.result(db.OK, "connected", name="box.tail1234.ts.net",
+                            services={"5055": "seerr.tail1234.ts.net"})
+        status = {"time": 0, "hostname": "box", "storage_root": "/mnt/storage", "checks": {
+            "seerr": db.result(db.OK, "running"), "desireerr": db.result(db.OK, "running"),
+            "tailscale": tailnet}}
+        page = db.render(status, "torrent-box.tail1234.ts.net", https=True)   # opened by its service name
+        self.assertIn('href="https://seerr.tail1234.ts.net/"', page)
+        self.assertIn('href="https://box.tail1234.ts.net:15056/"', page)          # no service: the box's port
+        self.assertIn('href="http://box:5055/"', db.render(status, "box"))      # plain http: as before
+
+    def test_approved_services_only(self):
+        me = {"CapMap": {"service-host": [{"svc:seerr": ["100.1.2.3"]}]}}
+        serving = {"Services": {
+            "svc:seerr": {"Web": {"seerr.t.ts.net:443": {"Handlers": {"/": {"Proxy": "http://127.0.0.1:5055"}}}}},
+            "svc:jellyfin": {"Web": {"jellyfin.t.ts.net:443": {"Handlers": {"/": {"Proxy": "http://127.0.0.1:8096"}}}}}}}
+        with unittest.mock.patch.object(db.subprocess, "run",
+                                        return_value=unittest.mock.Mock(stdout=json.dumps(serving))):
+            self.assertEqual(db.tailscale_services(me), {"5055": "seerr.t.ts.net"})
+        self.assertEqual(db.tailscale_services({}), {})
 
     def test_installable(self):
         manifest = json.loads(db.MANIFEST)

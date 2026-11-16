@@ -25,6 +25,10 @@ Used by setup.sh only; each subcommand does one small job:
                           `tailscale status --json` on stdin
   serve-ports             HTTPS port and local port of each app `tailscale serve status --json`
                           (on stdin) proxies to this box
+  serve-services          each Tailscale Service's name and the local port it serves on 443
+                          (`tailscale serve status --json` on stdin)
+  service-host            from `tailscale status --json` on stdin: this box's tags (comma-
+                          separated), then the services it's approved to host ("-" for none)
 Secrets (passwords) are passed through the environment, never on the command line, and
 never printed (but jellyfin-key's key, which setup.sh reads with $(...)).
 """
@@ -1297,6 +1301,36 @@ def serve_ports(text):
     return sorted(found)
 
 
+def serve_services(text):
+    """`tailscale serve status --json` -> [(service name without "svc:", local port)] for each
+    Tailscale Service whose HTTPS 443 goes to http://127.0.0.1:<port>."""
+    try:
+        status = json.loads(text or "{}")
+    except ValueError:
+        return []
+    found = []
+    for svc, conf in ((status or {}).get("Services") or {}).items():
+        for hostport, web in ((conf or {}).get("Web") or {}).items():
+            target = ((web or {}).get("Handlers") or {}).get("/", {}).get("Proxy") or ""
+            m = re.fullmatch(r"http://(?:127\.0\.0\.1|localhost):(\d+)/?", target)
+            if m and hostport.endswith(":443") and svc.startswith("svc:"):
+                found.append((svc[4:], int(m[1])))
+    return sorted(found)
+
+
+def service_host(text):
+    """`tailscale status --json` -> (this box's tags, the service names it's approved to host)."""
+    try:
+        me = (json.loads(text or "{}") or {}).get("Self") or {}
+    except (ValueError, AttributeError):
+        return [], []
+    approved = set()
+    for entry in (me.get("CapMap") or {}).get("service-host") or []:
+        if isinstance(entry, dict):
+            approved |= {name.removeprefix("svc:") for name in entry}
+    return list(me.get("Tags") or []), sorted(approved)
+
+
 def rpc_check(url, user, password, timeout=10):
     """Returns (exit code, message): 0 works, 3 login refused / not allowed, 4 unreachable."""
     tr = rss2transmission.Transmission(url, user, password, timeout)
@@ -1387,6 +1421,8 @@ def main(argv=None):
     sub.add_parser("random-topic")
     sub.add_parser("tailscale-status")
     sub.add_parser("serve-ports")
+    sub.add_parser("serve-services")
+    sub.add_parser("service-host")
     sub.add_parser("storage-candidates", help="lsblk -J on stdin -> tab-separated candidates")
     args = ap.parse_args(argv)
 
@@ -1477,6 +1513,13 @@ def main(argv=None):
         elif args.cmd == "serve-ports":
             for https_port, port in serve_ports(sys.stdin.read()):
                 print(https_port, port)
+        elif args.cmd == "serve-services":
+            for name, port in serve_services(sys.stdin.read()):
+                print(name, port)
+        elif args.cmd == "service-host":
+            tags, approved = service_host(sys.stdin.read())
+            print(",".join(tags) or "-")
+            print(" ".join(approved) or "-")
         elif args.cmd == "storage-candidates":
             for c in storage_candidates(sys.stdin.read()):
                 print("\t".join(c))

@@ -700,7 +700,35 @@ def check_tailscale(s):
     state = status.get("BackendState") or "?"
     if state != "Running":
         return result(WARN, state, ["sudo tailscale up"] if state == "NeedsLogin" else [])
-    return result(OK, f"connected as {name} ({ipv4})" if name else "connected", name=name)
+    return result(OK, f"connected as {name} ({ipv4})" if name else "connected", name=name,
+                  services=tailscale_services(me))
+
+
+def tailscale_services(me):
+    """Port -> name of the Tailscale Service (approved for this box) that serves it over HTTPS
+    on 443: the app's own address on the tailnet (README: Tailscale Services). Keys are strings,
+    as in status.json."""
+    approved = set()
+    for entry in (me.get("CapMap") or {}).get("service-host") or []:
+        approved |= set(entry) if isinstance(entry, dict) else set()
+    if not approved:
+        return {}
+    try:
+        serving = json.loads(subprocess.run(["tailscale", "serve", "status", "--json"],
+                                            capture_output=True, text=True, timeout=TIMEOUT).stdout)
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return {}
+    found = {}
+    for svc, conf in ((serving or {}).get("Services") or {}).items():
+        if svc not in approved:
+            continue
+        for hostport, web in (conf.get("Web") or {}).items():
+            host, _, port = hostport.rpartition(":")
+            target = ((web or {}).get("Handlers") or {}).get("/", {}).get("Proxy") or ""
+            m = re.fullmatch(r"http://(?:127\.0\.0\.1|localhost):(\d+)/?", target)
+            if m and port == "443":
+                found[m[1]] = host
+    return found
 
 
 def disk_usage(path):
@@ -1054,10 +1082,17 @@ class Logos:
 HOST = re.compile(r"(?P<host>\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*)(?::\d+)?")
 
 
-def app_url(host, port, https=False):
-    """A tile's link: the app's port on the host the page was opened with, or its HTTPS one."""
-    host = html.escape(host)
-    return f"https://{host}:{port + HTTPS_OFFSET}/" if https else f"http://{host}:{port}/"
+def app_url(host, port, https=False, tailnet=None):
+    """A tile's link: the app's port on the host the page was opened with; over HTTPS, the app's
+    own Tailscale Service if it has one, else its HTTPS port on the box's tailnet name. TAILNET:
+    the tailscale check's result (name, services)."""
+    tailnet = tailnet or {}
+    if not https:
+        return f"http://{html.escape(host)}:{port}/"
+    if service := (tailnet.get("services") or {}).get(str(port)):
+        return f"https://{html.escape(service)}/"
+    # the page may be opened by its own service name, which has none of the apps' ports
+    return f"https://{html.escape(tailnet.get('name') or host)}:{port + HTTPS_OFFSET}/"
 
 
 def link_host(header, fallback):
@@ -1344,7 +1379,7 @@ def render(status, host, https=False):
             badge = (f'<span class="badge" style="background:linear-gradient(135deg,{colors})">'
                      f'{glyph(paths, "#fff")}</span>')
         tiles.append(
-            f'<a class="tile" href="{app_url(host, port, https)}">{badge}<div>'
+            f'<a class="tile" href="{app_url(host, port, https, checks.get("tailscale"))}">{badge}<div>'
             f'<div class="name"><b>{name}</b><span class="flags">'
             f'{alert_html("own", "Its own problems", c["details"])}'
             f'{alert_html("upstream", "Not its own problem", c["upstream"])}'
@@ -1366,7 +1401,8 @@ def render(status, host, https=False):
                      f'<a href="smb://{e(host)}/storage">smb://{e(host)}/storage</a> '
                      f'(Mac, Linux, phones)</div>')
         elif cid == "ntfy" and c.get("server"):
-            url = e(ntfy_link(c["server"], host, https))
+            box = (checks.get("tailscale") or {}).get("name") if https else None  # see app_url
+            url = e(ntfy_link(c["server"], box or host, https))
             extra = (f'<div class="muted"><a href="{url}/">{url}</a> '
                      f'(web app; also the server for the ntfy phone app)</div>')
         elif cid == "ncore":
