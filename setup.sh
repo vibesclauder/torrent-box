@@ -40,6 +40,7 @@ ARR_DIR=$HOME/.local/share/torrent-box/arr  # compose.yml + the apps' config
 DASHBOARD_BIN=/usr/local/bin/torrent-box-dashboard
 DASHBOARD_UNIT=/etc/systemd/system/torrent-box-dashboard.service
 DASHBOARD_PORT=80  # the box's name alone opens the start page
+DASHBOARD_ICONS=/usr/local/share/torrent-box/icons  # dashboard.WEBAPP_ICON_DIRS
 DESIREERR_REPO=https://github.com/vibesclauder/desireerr.git  # requests for StashDB scenes (public)
 DESIREERR_DIR=$HOME/desireerr  # its user unit runs %h/desireerr/desireerr.py
 DESIREERR_PORT=5056
@@ -2006,6 +2007,10 @@ setup_dashboard() {
     step "Start page (http://$(hostname)/)"
     local changed=0
     if update_file "$(stamped "$REPO/dashboard.py")" "$DASHBOARD_BIN" 755 root; then changed=1; fi
+    local icon  # for installing the page as an app (read on each request: no restart)
+    for icon in "$REPO"/icons/*.png; do
+        update_file "$icon" "$DASHBOARD_ICONS/${icon##*/}" 644 root || true
+    done
     helper render --strip-comments "$REPO/systemd/torrent-box-dashboard.service" "USER=$USER" \
         "UID=$(id -u)" "PORT=$DASHBOARD_PORT" "CONFIG=$CONFIG" "ARR_DIR=$ARR_DIR" \
         >"$TMP/torrent-box-dashboard.service"

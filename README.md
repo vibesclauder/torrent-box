@@ -260,7 +260,8 @@ page; MagicDNS too); until then setup says so and serves nothing.
 
 The apps keep their plain http ports on the LAN and the tailnet (HTTPS can't share a port the
 app already listens on, hence the other port). The start page opened over HTTPS links to the
-apps' HTTPS ports. It's tailnet only: nothing is opened to the internet (that would be Funnel).
+apps' HTTPS ports, and installs as an app (Chrome's menu → Install app; Safari's Share → Add
+to Home Screen): its own icon and window. Its icons are drawn by `tools/make_icons.py`. It's tailnet only: nothing is opened to the internet (that would be Funnel).
 The certificate is a public Let's Encrypt one, so the box's tailnet name shows up in
 certificate transparency logs. Tailscale keeps the setup across reboots; `tailscale serve
 status` shows it, and with `tailscale_https = no` the next run of setup removes what it added

@@ -1069,6 +1069,31 @@ def link_host(header, fallback):
 # torrent-box's mark: a box with a download arrow, in the brand gradient
 BRAND = ("#4f5bd5", "#a14fd6")
 
+# To install the page as an app on a phone (over HTTPS): its manifest and icons, drawn by
+# tools/make_icons.py and installed by setup.sh (from a checkout: the repo's own).
+WEBAPP_ICON_DIRS = [Path("/usr/local/share/torrent-box/icons"), Path(__file__).resolve().parent / "icons"]
+WEBAPP_ICONS = ("icon-192.png", "icon-512.png", "icon-maskable-512.png", "icon-180.png")
+MANIFEST = json.dumps({
+    "id": "/", "name": "torrent-box", "short_name": "torrent-box", "start_url": "/", "scope": "/",
+    "display": "standalone", "background_color": "#0e1017", "theme_color": BRAND[0],
+    "icons": [{"src": "/app/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any"},
+              {"src": "/app/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any"},
+              {"src": "/app/icon-maskable-512.png", "sizes": "512x512", "type": "image/png",
+               "purpose": "maskable"}],
+}, indent=1).encode()
+
+
+def webapp_icon(name):
+    """One of WEBAPP_ICONS as PNG bytes, or None."""
+    if name not in WEBAPP_ICONS:
+        return None
+    for folder in WEBAPP_ICON_DIRS:
+        try:
+            return (folder / name).read_bytes()
+        except OSError:
+            continue
+    return None
+
 
 def logo_svg(gid, dot=None):
     """The logo; dot: a status color for the favicon's corner."""
@@ -1369,6 +1394,8 @@ def render(status, host, https=False):
 <meta name="theme-color" content="{BRAND[0]}">
 <title>{title}</title>
 <link rel="icon" href="{favicon(worst)}">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="apple-touch-icon" href="/app/icon-180.png">
 <style>{CSS}</style>
 <noscript><meta http-equiv="refresh" content="{REFRESH_SECONDS}"></noscript>
 </head><body><div class="wrap">
@@ -1488,13 +1515,17 @@ class Handler(BaseHTTPRequestHandler):
             kind = "application/json"
         elif path.startswith("/icon/") and (logo := self.status.logos.get(path[6:])):
             body, kind = logo
+        elif path == "/manifest.webmanifest":
+            body, kind = MANIFEST, "application/manifest+json"
+        elif path.startswith("/app/") and (icon := webapp_icon(path[5:])):
+            body, kind = icon, "image/png"
         else:
             self.send_error(404)
             return
         self.send_response(200)
         self.send_header("Content-Type", kind)
         self.send_header("Content-Length", str(len(body)))
-        if path.startswith("/icon/"):
+        if path.startswith(("/icon/", "/app/", "/manifest")):
             self.send_header("Cache-Control", "max-age=86400")
             # an SVG opened on its own is a document: no scripts from it on our page's origin
             self.send_header("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'")

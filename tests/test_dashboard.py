@@ -2,6 +2,7 @@ import base64
 import http.client
 import json
 import re
+import struct
 import tempfile
 import threading
 import time
@@ -355,6 +356,18 @@ class NtfyCheckTest(unittest.TestCase):
         self.assertIn('<a href="https://box.tail1234.ts.net:12586/">', page)
         self.assertIn('href="http://box:5055/"', db.render(status, "box"))
         self.assertEqual(db.ntfy_link("https://ntfy.sh", "box", https=True), "https://ntfy.sh")
+
+    def test_installable(self):
+        manifest = json.loads(db.MANIFEST)
+        self.assertEqual((manifest["start_url"], manifest["display"]), ("/", "standalone"))
+        for icon in manifest["icons"]:
+            png = db.webapp_icon(icon["src"].removeprefix("/app/"))   # the repo's own
+            self.assertEqual(png[:8], b"\x89PNG\r\n\x1a\n")
+            size = int(icon["sizes"].split("x")[0])
+            self.assertEqual(struct.unpack(">II", png[16:24]), (size, size))
+        self.assertIsNone(db.webapp_icon("../dashboard.py"))
+        status = {"time": 0, "hostname": "box", "storage_root": "/mnt/storage", "checks": {}}
+        self.assertIn('<link rel="manifest" href="/manifest.webmanifest">', db.render(status, "box"))
 
     def test_version_in_the_footer(self):
         status = {"time": 0, "hostname": "box", "storage_root": "/mnt/storage", "checks": {}}
