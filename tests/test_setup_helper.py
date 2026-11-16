@@ -367,17 +367,27 @@ class MiscTest(unittest.TestCase):
             sh.render("x=@STORAGE_ROOT@ @HOSTNAME@", {"STORAGE_ROOT": "/s"})
 
     def test_tailscale_status(self):
-        running = json.dumps({"BackendState": "Running", "Self": {
+        running = json.dumps({"BackendState": "Running", "CertDomains": ["box.tail1234.ts.net"], "Self": {
             "DNSName": "box.tail1234.ts.net.", "TailscaleIPs": ["fd7a:115c:a1e0::1", "100.101.102.103"]}})
         self.assertEqual(sh.tailscale_status(running),
-                         ("Running", "box.tail1234.ts.net", "100.101.102.103"))
+                         ("Running", "box.tail1234.ts.net", "100.101.102.103", "https"))
         self.assertEqual(sh.tailscale_status('{"BackendState": "NeedsLogin", "Self": null}'),
-                         ("NeedsLogin", "", ""))
-        self.assertEqual(sh.tailscale_status(""), ("", "", ""))  # not installed / not running
-        self.assertEqual(sh.tailscale_status("[]"), ("", "", ""))
+                         ("NeedsLogin", "", "", ""))
+        self.assertEqual(sh.tailscale_status(""), ("", "", "", ""))  # not installed / not running
+        self.assertEqual(sh.tailscale_status("[]"), ("", "", "", ""))
         self.assertEqual(run_main(["tailscale-status"], stdin=running),
-                         (0, "Running box.tail1234.ts.net 100.101.102.103\n"))
-        self.assertEqual(run_main(["tailscale-status"], stdin=""), (0, "- - -\n"))
+                         (0, "Running box.tail1234.ts.net 100.101.102.103 https\n"))
+        self.assertEqual(run_main(["tailscale-status"], stdin=""), (0, "- - - -\n"))
+
+    def test_serve_ports(self):
+        serving = json.dumps({"TCP": {"443": {"HTTPS": True}, "15055": {"HTTPS": True}, "8443": {"HTTPS": True}},
+                              "Web": {"box.tail1234.ts.net:443": {"Handlers": {"/": {"Proxy": "http://127.0.0.1:80"}}},
+                                      "box.tail1234.ts.net:15055": {"Handlers": {"/": {"Proxy": "http://localhost:5055"}}},
+                                      "box.tail1234.ts.net:8443": {"Handlers": {"/": {"Path": "/srv/www"}}}}})
+        self.assertEqual(sh.serve_ports(serving), [(443, 80), (15055, 5055)])   # not someone's file server
+        self.assertEqual(sh.serve_ports("{}"), [])
+        self.assertEqual(sh.serve_ports(""), [])
+        self.assertEqual(run_main(["serve-ports"], stdin=serving), (0, "443 80\n15055 5055\n"))
 
     def test_random_topic(self):
         topic = sh.random_topic()

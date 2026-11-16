@@ -21,7 +21,10 @@ Used by setup.sh only; each subcommand does one small job:
   service-unit UNIT CFG   the rss2transmission service with ReadWritePaths= from config.ini
   render FILE VAR=VALUE   replace @VAR@ placeholders
   random-topic            a fresh ntfy topic
-  tailscale-status        state, name and IPv4 from `tailscale status --json` on stdin
+  tailscale-status        state, name, IPv4 and whether it has HTTPS certificates, from
+                          `tailscale status --json` on stdin
+  serve-ports             HTTPS port and local port of each app `tailscale serve status --json`
+                          (on stdin) proxies to this box
 Secrets (passwords) are passed through the environment, never on the command line, and
 never printed (but jellyfin-key's key, which setup.sh reads with $(...)).
 """
@@ -1261,19 +1264,37 @@ def random_topic(length=16):
 
 
 def tailscale_status(text):
-    """`tailscale status --json` -> (backend state, MagicDNS name, Tailscale IPv4).
+    """`tailscale status --json` -> (backend state, MagicDNS name, Tailscale IPv4, "https" if
+    the tailnet gives it HTTPS certificates).
 
     State is e.g. "Running", "NeedsLogin", "Stopped"; "" if there's nothing to parse
-    (not installed, tailscaled not running). Missing name/address -> ""."""
+    (not installed, tailscaled not running). Missing name/address/certificates -> ""."""
     try:
         status = json.loads(text)
     except ValueError:
-        return "", "", ""
+        return "", "", "", ""
     if not isinstance(status, dict):
-        return "", "", ""
+        return "", "", "", ""
     me = status.get("Self") or {}
     ipv4 = next((ip for ip in me.get("TailscaleIPs") or [] if "." in ip), "")
-    return status.get("BackendState") or "", (me.get("DNSName") or "").rstrip("."), ipv4
+    return (status.get("BackendState") or "", (me.get("DNSName") or "").rstrip("."), ipv4,
+            "https" if status.get("CertDomains") else "")
+
+
+def serve_ports(text):
+    """`tailscale serve status --json` -> [(HTTPS port, local port)] for each HTTPS port whose
+    "/" goes to http://127.0.0.1:<port> (or localhost), as setup.sh serves the apps."""
+    try:
+        status = json.loads(text or "{}")
+    except ValueError:
+        return []
+    found = []
+    for hostport, web in ((status or {}).get("Web") or {}).items():
+        target = ((web or {}).get("Handlers") or {}).get("/", {}).get("Proxy") or ""
+        m = re.fullmatch(r"http://(?:127\.0\.0\.1|localhost):(\d+)/?", target)
+        if m and hostport.rpartition(":")[2].isdigit():
+            found.append((int(hostport.rpartition(":")[2]), int(m[1])))
+    return sorted(found)
 
 
 def rpc_check(url, user, password, timeout=10):
@@ -1365,6 +1386,7 @@ def main(argv=None):
     p.add_argument("var", nargs="*", help="NAME=VALUE")
     sub.add_parser("random-topic")
     sub.add_parser("tailscale-status")
+    sub.add_parser("serve-ports")
     sub.add_parser("storage-candidates", help="lsblk -J on stdin -> tab-separated candidates")
     args = ap.parse_args(argv)
 
@@ -1452,6 +1474,9 @@ def main(argv=None):
             print(random_topic())
         elif args.cmd == "tailscale-status":
             print(" ".join(v or "-" for v in tailscale_status(sys.stdin.read())))
+        elif args.cmd == "serve-ports":
+            for https_port, port in serve_ports(sys.stdin.read()):
+                print(https_port, port)
         elif args.cmd == "storage-candidates":
             for c in storage_candidates(sys.stdin.read()):
                 print("\t".join(c))

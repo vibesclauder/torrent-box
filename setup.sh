@@ -35,6 +35,7 @@ TAILSCALE_KEY=/usr/share/keyrings/tailscale-archive-keyring.gpg  # where their .
 TAILSCALE_SOURCES=/etc/apt/sources.list.d/tailscale.list
 TAILNET_V4=100.64.0.0/10  # the addresses Tailscale hands out
 TAILNET_V6=fd7a:115c:a1e0::/48
+TS_HTTPS_OFFSET=10000  # [setup] tailscale_https: an app's HTTPS port on the tailnet is its own + this (start page: 443)
 ARR_DIR=$HOME/.local/share/torrent-box/arr  # compose.yml + the apps' config
 DASHBOARD_BIN=/usr/local/bin/torrent-box-dashboard
 DASHBOARD_UNIT=/etc/systemd/system/torrent-box-dashboard.service
@@ -88,6 +89,8 @@ Answers can be given as environment variables instead of prompts:
                  config.ini [setup])
   TAILSCALE      yes or no: remote access through Tailscale (first run only, like MEDIA_SERVER)
   TS_AUTHKEY     Tailscale auth key, to join the tailnet without opening a login link
+  TAILSCALE_HTTPS  yes or no: the start page and web apps also over HTTPS on the tailnet
+                 (with TAILSCALE=yes; asked once, later: config.ini [setup])
   OWN_NTFY       yes or no: pushes through an ntfy server on this box instead of ntfy.sh
                  (asked once, later: config.ini [setup])
   ARR            yes or no: Prowlarr, Sonarr, Radarr and Seerr in Docker (first run only)
@@ -645,6 +648,34 @@ choose_tailscale() {
     case $tailscale in yes|no) ;; *) die "tailscale must be yes or no, not '$tailscale'" ;; esac
 }
 
+# Asked also on a box that already has Tailscale (it came later). Only with Tailscale.
+choose_tailscale_https() {
+    local saved
+    saved=$(ini "$config_src" setup tailscale_https)
+    if [[ $tailscale != yes ]]; then
+        tailscale_https=no
+    elif [[ -n $saved ]]; then
+        tailscale_https=$saved
+        if [[ -n ${TAILSCALE_HTTPS:-} && $TAILSCALE_HTTPS != "$saved" ]]; then
+            warn "ignoring TAILSCALE_HTTPS=$TAILSCALE_HTTPS: $CONFIG says $saved (change [setup] tailscale_https there to switch)"
+        fi
+    elif [[ -n ${TAILSCALE_HTTPS:-} ]]; then
+        tailscale_https=$TAILSCALE_HTTPS
+    elif (( DRY_RUN )); then
+        tailscale_https=yes
+        step "HTTPS on the tailnet"
+        info "would ask whether to serve the web apps over HTTPS on the tailnet (default yes); assuming yes below"
+    else
+        step "HTTPS on the tailnet"
+        info "the start page and the web apps also over HTTPS on the tailnet, with Tailscale's own"
+        info "certificates (plain http keeps working): https://<box>.<tailnet>.ts.net/, and each app"
+        info "on its port + $TS_HTTPS_OFFSET (Seerr: $((5055 + TS_HTTPS_OFFSET))). Needs HTTPS Certificates turned on in the"
+        info "Tailscale admin console (DNS page)."
+        if ask_yes "Serve them over HTTPS?"; then tailscale_https=yes; else tailscale_https=no; fi
+    fi
+    case $tailscale_https in yes|no) ;; *) die "tailscale_https must be yes or no, not '$tailscale_https'" ;; esac
+}
+
 # Asked also on a box that already has the others (it came later).
 choose_own_ntfy() {
     local saved default=no
@@ -1029,7 +1060,8 @@ setup_config() {
     fi
     # Remember the choices, so re-runs don't ask again.
     local key updates=()
-    for key in media_server samba avahi tailscale own_ntfy arr whisparr download_mbps; do
+    for key in media_server samba avahi tailscale tailscale_https own_ntfy arr whisparr download_mbps; do
+        [[ $key != tailscale_https || $tailscale == yes ]] || continue  # asked once Tailscale is on
         [[ $(ini "$CONFIG" setup "$key") == "${!key}" ]] || updates+=("$key=${!key}")
     done
     if (( ${#updates[@]} == 0 )); then
@@ -1452,7 +1484,7 @@ tailscale_status() {  # sets ts_state ("" if not installed/running), ts_name, ts
     if command -v tailscale >/dev/null; then
         out=$(tailscale status --json 2>/dev/null || true)
     fi
-    read -r ts_state ts_name ts_ip <<<"$(helper tailscale-status <<<"$out")"
+    read -r ts_state ts_name ts_ip ts_https <<<"$(helper tailscale-status <<<"$out")"
     [[ $ts_state != - ]] || ts_state=""
 }
 
@@ -1993,6 +2025,73 @@ setup_dashboard() {
         as_root systemctl enable torrent-box-dashboard
 }
 
+### 12a. HTTPS on the tailnet
+
+# The start page and the web apps this box runs, by port; ALL_WEB_PORTS: every one it may run.
+web_ports() {
+    echo "$DASHBOARD_PORT"
+    echo 9091
+    case $media_server in jellyfin) echo 8096 ;; minidlna) echo 8200 ;; esac
+    if [[ $own_ntfy == yes ]]; then echo "$NTFY_PORT"; fi
+    if [[ $arr == yes ]]; then printf '%s\n' 5055 8989 7878 9696; fi
+    if [[ $whisparr == yes ]]; then echo 6969; fi
+    if desireerr_on; then echo "$DESIREERR_PORT"; fi
+}
+ALL_WEB_PORTS="$DASHBOARD_PORT 9091 8096 8200 $NTFY_PORT 5055 8989 7878 9696 6969 $DESIREERR_PORT"
+
+https_port() { if (( $1 == DASHBOARD_PORT )); then echo 443; else echo $(( $1 + TS_HTTPS_OFFSET )); fi; }
+
+ts_serve() {  # `tailscale serve ARGS`, without its explanations
+    if (( DRY_RUN )); then as_root tailscale serve "$@"; else sudo tailscale serve "$@" >/dev/null; fi
+}
+
+# `tailscale serve` proxies each one's HTTPS port on the tailnet to it (the app itself has its
+# port on every address, so HTTPS needs another). Tailscale keeps that across reboots. Whatever
+# else is served on the tailnet is left alone.
+setup_tailscale_https() {
+    step "HTTPS on the tailnet"
+    if [[ $tailscale != yes ]]; then
+        info "not used (no Tailscale)"
+        return
+    fi
+    tailscale_status
+    if [[ $ts_state != Running ]]; then
+        info "Tailscale isn't connected: nothing changed (run setup.sh again once it is)"
+        return
+    fi
+    local serving want=() p hp
+    serving=$(tailscale serve status --json 2>/dev/null | helper serve-ports || true)
+    [[ $tailscale_https != yes ]] || mapfile -t want < <(web_ports)
+    for p in $ALL_WEB_PORTS; do  # ours that shouldn't be served any more
+        hp=$(https_port "$p")
+        if grep -qx "$hp $p" <<<"$serving" && ! printf '%s\n' "${want[@]}" | grep -qx "$p"; then
+            ts_serve --https="$hp" off
+            info "port $p: no longer over HTTPS"
+        fi
+    done
+    if [[ $tailscale_https != yes ]]; then
+        info "not used ([setup] tailscale_https = no in $CONFIG)"
+        return
+    fi
+    if [[ $ts_https != https ]]; then
+        warn "the tailnet gives no HTTPS certificates: turn on HTTPS Certificates in the Tailscale admin console (DNS page), then run setup.sh again"
+        return
+    fi
+    for p in "${want[@]}"; do
+        hp=$(https_port "$p")
+        grep -qx "$hp $p" <<<"$serving" && continue
+        ts_serve --bg --https="$hp" "http://127.0.0.1:$p"
+    done
+    # HTTPS visitors come from 127.0.0.1, which "Disabled for Local Addresses" lets in unasked.
+    local app
+    for app in sonarr radarr prowlarr whisparr; do
+        if grep -qs '<AuthenticationRequired>DisabledForLocalAddresses<' "$ARR_DIR/$app/config.xml"; then
+            warn "$app lets local addresses in without a login, and over HTTPS everyone is local: set Settings → General → Authentication Required to Enabled"
+        fi
+    done
+    info "https://$ts_name/ (start page); each app on its port + $TS_HTTPS_OFFSET, e.g. Transmission https://$ts_name:$(https_port 9091)/"
+}
+
 ### 13. Firewall
 
 setup_firewall() {
@@ -2137,6 +2236,10 @@ finish() {
         tailscale_status
         if [[ $ts_state == Running ]]; then
             info "Tailscale:              $ts_name ($ts_ip): from anywhere, use '${ts_name%%.*}' instead of ${lan_ip:-the LAN address} above"
+            if [[ $tailscale_https == yes && $ts_https == https ]]; then
+                info "HTTPS on the tailnet:   https://$ts_name/ (start page; its links go to the apps over HTTPS,"
+                info "                        each on its port + $TS_HTTPS_OFFSET, e.g. Seerr :$(https_port 5055))"
+            fi
         else
             info "Tailscale:              not connected (${ts_state:-not running})"
         fi
@@ -2196,6 +2299,7 @@ main() {
     choose_samba
     choose_avahi
     choose_tailscale
+    choose_tailscale_https
     choose_own_ntfy
     choose_arr
     choose_whisparr
@@ -2217,6 +2321,7 @@ main() {
     setup_desireerr
     setup_xxx_library
     setup_dashboard
+    setup_tailscale_https
     setup_firewall
     finish
 }

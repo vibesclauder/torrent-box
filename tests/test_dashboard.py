@@ -346,6 +346,16 @@ class NtfyCheckTest(unittest.TestCase):
         w = db.Watcher(delay=0)  # a push about it would have to go through it
         self.assertEqual(w.update({"ntfy": db.result(db.DOWN, "stopped")}, 0), [])
 
+    def test_links_over_https(self):
+        status = {"time": 0, "hostname": "box", "storage_root": "/mnt/storage", "checks": {
+            "seerr": db.result(db.OK, "running"),
+            "ntfy": db.result(db.OK, "own server, running", server="http://localhost:2586")}}
+        page = db.render(status, "box.tail1234.ts.net", https=True)
+        self.assertIn('href="https://box.tail1234.ts.net:15055/"', page)
+        self.assertIn('<a href="https://box.tail1234.ts.net:12586/">', page)
+        self.assertIn('href="http://box:5055/"', db.render(status, "box"))
+        self.assertEqual(db.ntfy_link("https://ntfy.sh", "box", https=True), "https://ntfy.sh")
+
     def test_version_in_the_footer(self):
         status = {"time": 0, "hostname": "box", "storage_root": "/mnt/storage", "checks": {}}
         self.assertIn("<span>torrent-box · <a", db.render(status, "box"))  # not installed

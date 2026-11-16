@@ -75,7 +75,7 @@ Re-running is safe: existing config/secrets are kept, it only asks for missing v
 system files are only rewritten (and services only restarted) when something changes.
 `./setup.sh --help` lists the environment variables for a non-interactive install
 (`STORAGE_ROOT`, `STORAGE_UUID`, `STORAGE_DISK`, `MEDIA_SERVER`, `SAMBA`, `SAMBA_PASSWORD`,
-`AVAHI`, `TAILSCALE`, `TS_AUTHKEY`, `ARR`, `WHISPARR`, `STASHDB_KEY`, `NCORE_USER`,
+`AVAHI`, `TAILSCALE`, `TS_AUTHKEY`, `TAILSCALE_HTTPS`, `ARR`, `WHISPARR`, `STASHDB_KEY`, `NCORE_USER`,
 `NCORE_PASSWORD`, `NCORE_2FA`, `JELLYFIN_USER`, `JELLYFIN_PASSWORD`, `DOWNLOAD_MBPS`,
 `FEED_URL`, `RPC_USER`, `RPC_PASSWORD`, `LAN_SUBNET`). `--shadow` also installs
 `systemd/shadow.conf` (dry runs only, for a trial next to an old setup).
@@ -244,8 +244,29 @@ Worth doing once in the Tailscale admin console: **disable key expiry** for the 
 again. Later runs of setup never log out, re-login or `tailscale down`; with
 `tailscale = no` Transmission and the share stop accepting tailnet addresses (Tailscale stays
 installed and connected; the ufw rules stay too, `sudo ufw status numbered` and
-`sudo ufw delete N` remove them). Extras not set up by torrent-box: HTTPS names via
-`tailscale serve`, exit node, subnet router.
+`sudo ufw delete N` remove them). Extras not set up by torrent-box: exit node, subnet router.
+
+### HTTPS on the tailnet
+
+With `[setup] tailscale_https = yes` (asked once Tailscale is on, default yes), the start page
+and every web app are also served over HTTPS on the tailnet, with Tailscale's own certificates,
+by `tailscale serve`. Turn on **HTTPS Certificates** once in the Tailscale admin console (DNS
+page; MagicDNS too); until then setup says so and serves nothing.
+
+| | over HTTPS |
+|---|---|
+| start page | `https://<box>.<tailnet>.ts.net/` |
+| every app | its own port + 10000: Seerr `:15055`, Desireerr `:15056`, Jellyfin `:18096`, Transmission `:19091`, Sonarr `:18989`, Radarr `:17878`, Prowlarr `:19696`, Whisparr `:16969`, ntfy `:12586` (MiniDLNA's page `:18200`) |
+
+The apps keep their plain http ports on the LAN and the tailnet (HTTPS can't share a port the
+app already listens on, hence the other port). The start page opened over HTTPS links to the
+apps' HTTPS ports. It's tailnet only: nothing is opened to the internet (that would be Funnel).
+The certificate is a public Let's Encrypt one, so the box's tailnet name shows up in
+certificate transparency logs. Tailscale keeps the setup across reboots; `tailscale serve
+status` shows it, and with `tailscale_https = no` the next run of setup removes what it added
+(and only that). The apps see every HTTPS visitor as `127.0.0.1`: Sonarr, Radarr, Prowlarr and
+Whisparr must keep their login on for everyone (Authentication Required: Enabled, not
+"Disabled for Local Addresses").
 
 ## Own ntfy server
 

@@ -80,7 +80,10 @@ DISK_HOT = 55  # °C; smartd pushes at this too (smartd.conf -W)
 OK, WARN, DOWN = "ok", "warn", "down"
 WORST = {OK: 0, WARN: 1, DOWN: 2}
 
-# The apps' tiles: (check id, name, what it's for, port). Shown when the check exists.
+# The apps' tiles: (check id, name, what it's for, port). Shown when the check exists. On a
+# page opened over HTTPS (setup.sh's [setup] tailscale_https), they link to the apps' HTTPS
+# ports on the tailnet: their own plus HTTPS_OFFSET.
+HTTPS_OFFSET = 10000
 TILES = [
     ("jellyfin", "Jellyfin", "Watch movies and series", 8096),
     ("minidlna", "MiniDLNA", "DLNA server status", 8200),
@@ -350,12 +353,14 @@ def check_ntfy(s):
                   server=server)
 
 
-def ntfy_link(server, host):
+def ntfy_link(server, host, https=False):
     """The ntfy server's address as the browser can reach it: "localhost" in the config is
-    this box, which the viewer knows as host."""
+    this box, which the viewer knows as host (over HTTPS: on its HTTPS port, see TILES)."""
     parts = urllib.parse.urlsplit(server)
     if parts.hostname not in ("localhost", "127.0.0.1", "::1"):
         return server
+    if https:
+        return f"https://{host}:{(parts.port or 80) + HTTPS_OFFSET}"
     return parts._replace(netloc=f"{host}:{parts.port}" if parts.port else host).geturl()
 
 
@@ -1049,6 +1054,12 @@ class Logos:
 HOST = re.compile(r"(?P<host>\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*)(?::\d+)?")
 
 
+def app_url(host, port, https=False):
+    """A tile's link: the app's port on the host the page was opened with, or its HTTPS one."""
+    host = html.escape(host)
+    return f"https://{host}:{port + HTTPS_OFFSET}/" if https else f"http://{host}:{port}/"
+
+
 def link_host(header, fallback):
     """The host the browser used (so links work by IP, name or Tailscale name), if sane."""
     match = HOST.fullmatch((header or "").strip())
@@ -1269,7 +1280,7 @@ def alert_html(kind, heading, items):
             f'{glyph(ALERT_ICON, "currentColor")}<span class="tip"><b>{heading}</b><ul>{lis}</ul></span></span>')
 
 
-def render(status, host):
+def render(status, host, https=False):
     e = html.escape
     checks = status["checks"]
     worst = max((c["state"] for c in checks.values()), key=WORST.get, default=OK)
@@ -1308,7 +1319,7 @@ def render(status, host):
             badge = (f'<span class="badge" style="background:linear-gradient(135deg,{colors})">'
                      f'{glyph(paths, "#fff")}</span>')
         tiles.append(
-            f'<a class="tile" href="http://{e(host)}:{port}/">{badge}<div>'
+            f'<a class="tile" href="{app_url(host, port, https)}">{badge}<div>'
             f'<div class="name"><b>{name}</b><span class="flags">'
             f'{alert_html("own", "Its own problems", c["details"])}'
             f'{alert_html("upstream", "Not its own problem", c["upstream"])}'
@@ -1330,7 +1341,7 @@ def render(status, host):
                      f'<a href="smb://{e(host)}/storage">smb://{e(host)}/storage</a> '
                      f'(Mac, Linux, phones)</div>')
         elif cid == "ntfy" and c.get("server"):
-            url = e(ntfy_link(c["server"], host))
+            url = e(ntfy_link(c["server"], host, https))
             extra = (f'<div class="muted"><a href="{url}/">{url}</a> '
                      f'(web app; also the server for the ntfy phone app)</div>')
         elif cid == "ncore":
@@ -1469,8 +1480,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         path = self.path.split("?", 1)[0]
         if path == "/":
-            body = render(self.status.get(), link_host(self.headers.get("Host"),
-                                                       socket.gethostname())).encode()
+            body = render(self.status.get(), link_host(self.headers.get("Host"), socket.gethostname()),
+                          https=self.headers.get("X-Forwarded-Proto") == "https").encode()
             kind = "text/html; charset=utf-8"
         elif path == "/status.json":
             body = json.dumps(self.status.get(), indent=1).encode()
