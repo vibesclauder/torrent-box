@@ -75,7 +75,7 @@ Re-running is safe: existing config/secrets are kept, it only asks for missing v
 system files are only rewritten (and services only restarted) when something changes.
 `./setup.sh --help` lists the environment variables for a non-interactive install
 (`STORAGE_ROOT`, `STORAGE_UUID`, `STORAGE_DISK`, `MEDIA_SERVER`, `SAMBA`, `SAMBA_PASSWORD`,
-`AVAHI`, `TAILSCALE`, `TS_AUTHKEY`, `TAILSCALE_HTTPS`, `TAILSCALE_SERVICES`, `ARR`, `WHISPARR`, `STASHDB_KEY`, `NCORE_USER`,
+`AVAHI`, `TAILSCALE`, `TS_AUTHKEY`, `TAILSCALE_HTTPS`, `ARR`, `WHISPARR`, `STASHDB_KEY`, `NCORE_USER`,
 `NCORE_PASSWORD`, `NCORE_2FA`, `JELLYFIN_USER`, `JELLYFIN_PASSWORD`, `DOWNLOAD_MBPS`,
 `FEED_URL`, `RPC_USER`, `RPC_PASSWORD`, `LAN_SUBNET`). `--shadow` also installs
 `systemd/shadow.conf` (dry runs only, for a trial next to an old setup).
@@ -272,32 +272,20 @@ Whisparr must keep their login on for everyone (Authentication Required: Enabled
 ### Tailscale Services: an own name for each app
 
 Phones tell installed web apps apart by name only, not by port, so with the HTTPS ports above
-only one of them can open its links (and it grabs everything on the box's name). With
-`[setup] tailscale_services = yes`, setup puts the start page, Seerr, Desireerr and Jellyfin
-under their own names with [Tailscale Services](https://tailscale.com/kb/1552/tailscale-services):
+only one of them can open its links (and it grabs everything on the box's name). Under their
+own names on the tailnet ([Tailscale Services](https://tailscale.com/kb/1552/tailscale-services):
 `https://torrent-box.<tailnet>.ts.net`, `https://seerr.<tailnet>.ts.net`, `desireerr`,
-`jellyfin`. The start page opened over HTTPS links to them. Install each app on the phone from
-its own name.
+`jellyfin`), each installs as its own app and the start page's links open them.
 
-First, in the Tailscale admin console:
-
-1. **Access controls**: a tag for the box, approval of its services, and access to them:
-   ```json
-   "tagOwners":     { "tag:server": ["autogroup:admin"] },
-   "autoApprovers": { "services": { "tag:torrent-box": ["tag:server"] } },
-   "grants": [
-     { "src": ["autogroup:member"], "dst": ["svc:torrent-box", "svc:seerr", "svc:desireerr", "svc:jellyfin"], "ip": ["443"] }
-   ]
-   ```
-   (add the grant to the ones you have; `tag:torrent-box` needs a `tagOwners` line too).
-2. **Machines**: the box → Edit ACL tags → `tag:server`. Only tagged devices host services, and
-   a tagged device is no longer yours but the tag's: rules for your own devices (`autogroup:self`)
-   no longer cover it. Check that its key expiry is still off.
-3. **Services** → Advertise → Define a Service, for each of `torrent-box`, `seerr`, `desireerr`
-   and `jellyfin`: port `tcp:443`, service tag `tag:torrent-box`.
-
-Then setup serves them (`tailscale serve --service=svc:<name>`) and says which aren't approved
-yet. With `tailscale_services = no` the next run removes them (only these four).
+That takes a few steps in the Tailscale admin console (a tag for the box, the services defined,
+an access rule), which no script can do for you. The start page lists them, with the policy to
+paste and what's done so far: **`http://<box>/tailscale`** (and a note on the start page while
+some aren't ready). Once the box has its tag, setup serves the services
+(`tailscale serve --service=svc:<name>`); run it again after tagging. Nothing breaks halfway: an
+app's tile links to its own name only once Tailscale approved it for the box, and only if the
+viewer's device reaches it (the page tries; else the tile keeps the app's HTTPS port). Apps the
+box no longer runs lose their service on the next run of setup; other services the box hosts
+are left alone.
 
 ## Own ntfy server
 

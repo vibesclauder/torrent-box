@@ -92,8 +92,6 @@ Answers can be given as environment variables instead of prompts:
   TS_AUTHKEY     Tailscale auth key, to join the tailnet without opening a login link
   TAILSCALE_HTTPS  yes or no: the start page and web apps also over HTTPS on the tailnet
                  (with TAILSCALE=yes; asked once, later: config.ini [setup])
-  TAILSCALE_SERVICES  yes or no: the start page, Seerr, Desireerr and Jellyfin under their own
-                 tailnet names (Tailscale Services; admin console steps first, see README)
   OWN_NTFY       yes or no: pushes through an ntfy server on this box instead of ntfy.sh
                  (asked once, later: config.ini [setup])
   ARR            yes or no: Prowlarr, Sonarr, Radarr and Seerr in Docker (first run only)
@@ -679,34 +677,6 @@ choose_tailscale_https() {
     case $tailscale_https in yes|no) ;; *) die "tailscale_https must be yes or no, not '$tailscale_https'" ;; esac
 }
 
-# Asked also on a box that already has Tailscale (it came later). Only with Tailscale.
-choose_tailscale_services() {
-    local saved
-    saved=$(ini "$config_src" setup tailscale_services)
-    if [[ $tailscale != yes ]]; then
-        tailscale_services=no
-    elif [[ -n $saved ]]; then
-        tailscale_services=$saved
-        if [[ -n ${TAILSCALE_SERVICES:-} && $TAILSCALE_SERVICES != "$saved" ]]; then
-            warn "ignoring TAILSCALE_SERVICES=$TAILSCALE_SERVICES: $CONFIG says $saved (change [setup] tailscale_services there to switch)"
-        fi
-    elif [[ -n ${TAILSCALE_SERVICES:-} ]]; then
-        tailscale_services=$TAILSCALE_SERVICES
-    elif (( DRY_RUN )); then
-        tailscale_services=no
-        step "Tailscale Services"
-        info "would ask whether to give the apps their own tailnet names (default no); assuming no below"
-    else
-        step "Tailscale Services"
-        info "the start page, Seerr, Desireerr and Jellyfin under their own names on the tailnet"
-        info "(https://seerr.<tailnet>.ts.net and so on), so a phone can install each as its own app."
-        info "Needs steps in the Tailscale admin console first: tag this box, define the services,"
-        info "allow them in the access rules (README: Tailscale Services)."
-        if ask_no "Give them their own names?"; then tailscale_services=yes; else tailscale_services=no; fi
-    fi
-    case $tailscale_services in yes|no) ;; *) die "tailscale_services must be yes or no, not '$tailscale_services'" ;; esac
-}
-
 # Asked also on a box that already has the others (it came later).
 choose_own_ntfy() {
     local saved default=no
@@ -1091,8 +1061,8 @@ setup_config() {
     fi
     # Remember the choices, so re-runs don't ask again.
     local key updates=()
-    for key in media_server samba avahi tailscale tailscale_https tailscale_services own_ntfy arr whisparr download_mbps; do
-        [[ $key != tailscale_https && $key != tailscale_services || $tailscale == yes ]] || continue  # asked once Tailscale is on
+    for key in media_server samba avahi tailscale tailscale_https own_ntfy arr whisparr download_mbps; do
+        [[ $key != tailscale_https || $tailscale == yes ]] || continue  # asked once Tailscale is on
         [[ $(ini "$CONFIG" setup "$key") == "${!key}" ]] || updates+=("$key=${!key}")
     done
     if (( ${#updates[@]} == 0 )); then
@@ -2139,15 +2109,13 @@ service_apps() {
 }
 ALL_SERVICES="torrent-box seerr desireerr jellyfin"
 
-# Each app's HTTPS 443 under svc:<name> (https://<name>.<tailnet>.ts.net). The services are
-# defined, allowed and approved in the admin console (README); here only this box's side.
-# Other services this box hosts are left alone.
+# Each app's HTTPS 443 under svc:<name> (https://<name>.<tailnet>.ts.net), once the box has a
+# tag (only tagged devices host services). Defining, allowing and approving them is done in the
+# Tailscale admin console: the start page's /tailscale lists the steps and what's done. Other
+# services this box hosts are left alone.
 setup_tailscale_services() {
-    step "Tailscale Services"
-    if [[ $tailscale != yes ]]; then
-        info "not used (no Tailscale)"
-        return
-    fi
+    step "Tailscale Services (own names for the apps)"
+    [[ $tailscale == yes ]] || { info "not used (no Tailscale)"; return; }
     tailscale_status
     if [[ $ts_state != Running ]]; then
         info "Tailscale isn't connected: nothing changed (run setup.sh again once it is)"
@@ -2155,20 +2123,16 @@ setup_tailscale_services() {
     fi
     local serving want=() entry name tags approved pending=()
     serving=$(tailscale serve status --json 2>/dev/null | helper serve-services || true)
-    [[ $tailscale_services != yes ]] || mapfile -t want < <(service_apps)
-    for name in $ALL_SERVICES; do  # ours that shouldn't be served any more
+    mapfile -t want < <(service_apps)
+    for name in $ALL_SERVICES; do  # ours whose app this box no longer runs
         if grep -q "^$name " <<<"$serving" && ! printf '%s\n' "${want[@]}" | grep -q "^$name:"; then
             ts_serve clear "svc:$name"
             info "svc:$name: no longer served"
         fi
     done
-    if [[ $tailscale_services != yes ]]; then
-        info "not used ([setup] tailscale_services = no in $CONFIG)"
-        return
-    fi
     { read -r tags; read -r approved; } <<<"$(tailscale status --json 2>/dev/null | helper service-host)"
-    if [[ $tags == - ]]; then
-        warn "this box has no tag, and only tagged devices host services: tag it in the Tailscale admin console (README: Tailscale Services), then run setup.sh again"
+    if [[ $ts_https != https || $tags == - ]]; then
+        info "not set up: the steps are on the start page, http://$(hostname)/tailscale (until then the apps keep their ports)"
         return
     fi
     for entry in "${want[@]}"; do
@@ -2178,11 +2142,11 @@ setup_tailscale_services() {
         if [[ " $approved " == *" $name "* ]]; then
             info "https://$name.${ts_name#*.}/"
         else
-            pending+=("svc:$name")
+            pending+=("$name")
         fi
     done
     (( ${#pending[@]} == 0 )) ||
-        warn "not approved yet: ${pending[*]} (define them in the admin console's Services page and allow this box to host them; README: Tailscale Services)"
+        info "served, not approved yet: ${pending[*]} (the steps: http://$(hostname)/tailscale)"
 }
 
 ### 13. Firewall
@@ -2329,9 +2293,7 @@ finish() {
         tailscale_status
         if [[ $ts_state == Running ]]; then
             info "Tailscale:              $ts_name ($ts_ip): from anywhere, use '${ts_name%%.*}' instead of ${lan_ip:-the LAN address} above"
-            if [[ $tailscale_services == yes ]]; then
-                info "Tailscale Services:     https://torrent-box.${ts_name#*.}/ (start page; its links go to the apps' own names)"
-            fi
+            info "Own app names:          http://$(hostname)/tailscale (Tailscale Services: the steps, and what's done)"
             if [[ $tailscale_https == yes && $ts_https == https ]]; then
                 info "HTTPS on the tailnet:   https://$ts_name/ (start page; its links go to the apps over HTTPS,"
                 info "                        each on its port + $TS_HTTPS_OFFSET, e.g. Seerr :$(https_port 5055))"
@@ -2396,7 +2358,6 @@ main() {
     choose_avahi
     choose_tailscale
     choose_tailscale_https
-    choose_tailscale_services
     choose_own_ntfy
     choose_arr
     choose_whisparr

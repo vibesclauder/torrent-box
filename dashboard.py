@@ -701,34 +701,36 @@ def check_tailscale(s):
     if state != "Running":
         return result(WARN, state, ["sudo tailscale up"] if state == "NeedsLogin" else [])
     return result(OK, f"connected as {name} ({ipv4})" if name else "connected", name=name,
-                  services=tailscale_services(me))
+                  certs=bool(status.get("CertDomains")), tags=list(me.get("Tags") or []),
+                  **tailscale_services(me))
 
 
 def tailscale_services(me):
-    """Port -> name of the Tailscale Service (approved for this box) that serves it over HTTPS
-    on 443: the app's own address on the tailnet (README: Tailscale Services). Keys are strings,
-    as in status.json."""
+    """The box's Tailscale Services (its apps' own names, see SERVICES): {"approved": names the
+    tailnet lets it host, "served": {name: its own name on the tailnet} for those it serves on
+    HTTPS 443, "links": {port: own name} for the approved ones, by the app's port (a string,
+    as in status.json)}."""
     approved = set()
     for entry in (me.get("CapMap") or {}).get("service-host") or []:
-        approved |= set(entry) if isinstance(entry, dict) else set()
-    if not approved:
-        return {}
+        if isinstance(entry, dict):
+            approved |= {svc.removeprefix("svc:") for svc in entry}
+    served, links = {}, {}
     try:
         serving = json.loads(subprocess.run(["tailscale", "serve", "status", "--json"],
                                             capture_output=True, text=True, timeout=TIMEOUT).stdout)
     except (OSError, subprocess.SubprocessError, ValueError):
-        return {}
-    found = {}
+        serving = {}
     for svc, conf in ((serving or {}).get("Services") or {}).items():
-        if svc not in approved:
-            continue
-        for hostport, web in (conf.get("Web") or {}).items():
+        name = svc.removeprefix("svc:")
+        for hostport, web in ((conf or {}).get("Web") or {}).items():
             host, _, port = hostport.rpartition(":")
             target = ((web or {}).get("Handlers") or {}).get("/", {}).get("Proxy") or ""
             m = re.fullmatch(r"http://(?:127\.0\.0\.1|localhost):(\d+)/?", target)
             if m and port == "443":
-                found[m[1]] = host
-    return found
+                served[name] = host
+                if name in approved:
+                    links[m[1]] = host
+    return {"approved": sorted(approved), "served": served, "links": links}
 
 
 def disk_usage(path):
@@ -1082,6 +1084,30 @@ class Logos:
 HOST = re.compile(r"(?P<host>\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*)(?::\d+)?")
 
 
+# The apps' own names on the tailnet, as Tailscale Services (svc:<name>), which setup.sh
+# serves once the box is tagged; /tailscale shows the steps. (name, its tile's port; None:
+# the start page.)
+SERVICES = [("torrent-box", None), ("seerr", 5055), ("desireerr", 5056), ("jellyfin", 8096)]
+
+
+def wanted_services(checks):
+    """The SERVICES this box runs: the start page, and the apps it has a tile for."""
+    return [(name, port) for name, port in SERVICES if port is None or name in checks]
+
+
+def services_note(checks, https):
+    """On a page opened over HTTPS (so on the tailnet): how many apps have their own name yet."""
+    tailnet = checks.get("tailscale")
+    if not https or not tailnet or tailnet["state"] != OK:
+        return ""
+    wanted = [name for name, _ in wanted_services(checks)]
+    ready = [n for n in wanted if n in tailnet.get("approved", ()) and n in tailnet.get("served", {})]
+    if len(ready) == len(wanted):
+        return ""
+    return (f'<p class="muted">Own names on the tailnet, so a phone installs each app separately: '
+            f'{len(ready)} of {len(wanted)} ready · <a href="/tailscale">how to set them up</a></p>')
+
+
 def app_url(host, port, https=False, tailnet=None):
     """A tile's link: the app's port on the host the page was opened with; over HTTPS, the app's
     own Tailscale Service if it has one, else its HTTPS port on the box's tailnet name. TAILNET:
@@ -1089,10 +1115,12 @@ def app_url(host, port, https=False, tailnet=None):
     tailnet = tailnet or {}
     if not https:
         return f"http://{html.escape(host)}:{port}/"
-    if service := (tailnet.get("services") or {}).get(str(port)):
-        return f"https://{html.escape(service)}/"
     # the page may be opened by its own service name, which has none of the apps' ports
-    return f"https://{html.escape(tailnet.get('name') or host)}:{port + HTTPS_OFFSET}/"
+    by_port = f"https://{html.escape(tailnet.get('name') or host)}:{port + HTTPS_OFFSET}/"
+    if service := (tailnet.get("links") or {}).get(str(port)):
+        # the script falls back to the port where this device can't reach the service
+        return f'https://{html.escape(service)}/" data-fallback="{by_port}'
+    return by_port
 
 
 def link_host(header, fallback):
@@ -1262,6 +1290,14 @@ box-shadow:0 8px 28px rgba(0,0,0,.28)}
 .alert:hover .tip,.alert.open .tip{display:block}
 code{font-size:13px}
 a{color:var(--accent)}
+h1{font-size:24px;margin:8px 0 12px}
+ol.steps{padding:0;list-style:none}
+ol.steps li{display:flex;gap:12px;align-items:flex-start;padding:10px 0;border-top:1px solid var(--line)}
+ol.steps li>.dot{margin-top:6px}
+pre{font-size:12px;overflow-x:auto;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:10px}
+table.svc{width:100%%;border-collapse:collapse;background:var(--card);border:1px solid var(--line)}
+table.svc th,table.svc td{padding:10px 12px;text-align:left;border-top:1px solid var(--line);font-size:14px}
+table.svc th{font-size:12px;color:var(--muted);border-top:0}
 form.code{display:flex;gap:8px;margin-top:8px}
 form.code input{font:inherit;width:9em;padding:6px 10px;letter-spacing:.1em;color:inherit;
 background:var(--bg);border:1px solid var(--line);border-radius:8px}
@@ -1276,7 +1312,27 @@ flex-wrap:wrap;gap:6px}
 """ % BRAND
 
 
-SCRIPT = """
+# Tries the apps' own tailnet names from the viewer's device: a tile whose name doesn't answer
+# here links to the app's port instead, and /tailscale shows which ones answer.
+PROBE_SCRIPT = """
+const probed={};
+function probe(url){
+  if(!(url in probed))probed[url]=fetch(url,{mode:"no-cors",cache:"no-store",signal:AbortSignal.timeout(5000)})
+    .then(()=>true,()=>false);
+  return probed[url];
+}
+function useReachable(){
+  for(const a of document.querySelectorAll("a[data-fallback]")){
+    probe(a.getAttribute("href")).then(ok=>{if(!ok)a.href=a.dataset.fallback;});
+  }
+  for(const d of document.querySelectorAll("[data-probe]")){
+    probe(d.dataset.probe).then(ok=>{d.className="dot "+(ok?"ok":"down");d.title=ok?"reachable":"not reachable from here";});
+  }
+}
+"""
+
+SCRIPT = PROBE_SCRIPT + """
+useReachable();
 function localTimes(){  // the box's times in the viewer's time zone
   for(const t of document.querySelectorAll("time[datetime]")){
     t.title=t.textContent;
@@ -1296,6 +1352,7 @@ async function refresh(){
     const page=new DOMParser().parseFromString(await r.text(),"text/html");
     document.querySelector("main").replaceWith(page.querySelector("main"));
     localTimes();
+    useReachable();
     document.title=page.title;
     document.querySelector("link[rel=icon]").href=page.querySelector("link[rel=icon]").href;
   }catch(e){
@@ -1424,6 +1481,7 @@ def render(status, host, https=False):
     updated = (f'<time datetime="{time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(status["time"]))}">'
                f'{time.strftime("%H:%M:%S %Z", time.localtime(status["time"]))}</time>')
     title = f"{hostname} · torrent-box" if worst == OK else f"⚠ {hostname} · torrent-box"
+    tailnet_link = ' · <a href="/tailscale">tailnet names</a>' if "tailscale" in checks else ""
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -1443,13 +1501,89 @@ def render(status, host, https=False):
 </header>
 {banner}
 <h2>Apps</h2>
+{services_note(checks, https)}
 <div class="grid">{"".join(tiles)}</div>
 <h2>Health</h2>
 <div class="rows">{"".join(rows)}</div>
 <footer><span id="updated">Updated {updated}, refreshes every {REFRESH_SECONDS} s.</span>
-<span>torrent-box{" " + e(VERSION) if VERSION else ""} · <a href="https://github.com/{GITHUB_REPO}">GitHub</a></span></footer>
+<span>torrent-box{" " + e(VERSION) if VERSION else ""}{tailnet_link} · <a href="https://github.com/{GITHUB_REPO}">GitHub</a></span></footer>
 </main>
 </div><script>{SCRIPT}</script></body></html>
+"""
+
+
+def render_tailscale(status, https=False):
+    """/tailscale: the steps that give the apps their own names on the tailnet (SERVICES), each
+    with its state; the script fills in which ones this device reaches."""
+    e = html.escape
+    checks = status["checks"]
+    tailnet = checks.get("tailscale")
+
+    def dot(ok, title=""):
+        state = {True: OK, False: DOWN, None: ""}[ok]
+        return f'<span class="dot {state}" title="{e(title)}"></span>'
+    if not tailnet:
+        body = "<p>Tailscale isn't set up on this box (<code>[setup] tailscale</code>).</p>"
+    elif tailnet["state"] != OK:
+        body = f"<p>Tailscale isn't connected: {e(tailnet['summary'])}.</p>"
+    else:
+        domain = tailnet["name"].partition(".")[2]
+        wanted = [name for name, _ in wanted_services(checks)]
+        approved, served = set(tailnet.get("approved", ())), tailnet.get("served", {})
+        tags = tailnet.get("tags") or []
+        box_tag = tags[0] if tags else "tag:server"
+        policy = "\n".join([
+            f'"tagOwners": {json.dumps({box_tag: ["autogroup:admin"], "tag:torrent-box": ["autogroup:admin"]})},',
+            f'"autoApprovers": {json.dumps({"services": {"tag:torrent-box": [box_tag]}})},',
+            '"grants": [',
+            f'  {json.dumps({"src": ["autogroup:member"], "dst": [f"svc:{n}" for n in wanted], "ip": ["443"]})}',
+            "]"])
+        rows = []
+        for name in wanted:
+            address = f"https://{name}.{domain}/"
+            ready = name in served and name in approved
+            reach = (f'<span class="dot" data-probe="{e(address)}" title="checking"></span>'
+                     if ready and https else dot(None, "once it's served and approved"))
+            rows.append(f'<tr><td><b>{e(name)}</b><div class="muted">{e(address)}</div></td>'
+                        f'<td>{dot(name in served, "served" if name in served else "not served yet: step 5")}</td>'
+                        f'<td>{dot(name in approved, "approved" if name in approved else "not defined or not approved: steps 2 and 4")}</td>'
+                        f'<td>{reach}</td></tr>')
+        now = f" (now: {e(', '.join(tags))})" if tags else ""
+        body = f"""<p>Phones tell installed web apps apart by their name, not their port. Under their own
+names on the tailnet (<a href="https://tailscale.com/kb/1552/tailscale-services">Tailscale Services</a>),
+the start page and the apps install as separate apps, and the start page's links open them. Until an
+app's name is ready, its tile links to its HTTPS port on <code>{e(tailnet["name"])}</code>.</p>
+<h2>Steps</h2>
+<ol class="steps">
+<li>{dot(tailnet.get("certs"), "on" if tailnet.get("certs") else "off")}<div><b>Admin console → DNS</b>: MagicDNS and HTTPS Certificates on.</div></li>
+<li>{dot(None, "shown by Approved and Reachable below")}<div><b>Admin console → Access controls</b>: a tag for the box, approval of
+its services, and access to them (merge with what's there):<pre>{e(policy)}</pre></div></li>
+<li>{dot(bool(tags), ", ".join(tags) or "no tag")}<div><b>Admin console → Machines</b>: this box → Edit ACL tags → <code>{e(box_tag)}</code>{now}.
+A tagged device belongs to the tag: rules for your own devices (<code>autogroup:self</code>) no longer
+cover it. Check that its key expiry stays off.</div></li>
+<li>{dot(all(n in approved for n in wanted))}<div><b>Admin console → Services</b> → Advertise → Define a Service, for each
+name below: port <code>tcp:443</code>, service tag <code>tag:torrent-box</code>.</div></li>
+<li>{dot(all(n in served for n in wanted))}<div><b>On the box</b>: <code>{e(update_command().partition(" && ")[0])} &amp;&amp; ./setup.sh</code>
+serves them, once the box has its tag.</div></li>
+</ol>
+<h2>The names</h2>
+<table class="svc"><tr><th></th><th>Served</th><th>Approved</th><th>Reachable here</th></tr>{"".join(rows)}</table>
+<p class="muted">Served and approved but not reachable from here: the access rule (step 2) doesn't let this
+device in, or it isn't a member of the tailnet.</p>"""
+    return f"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="{BRAND[0]}">
+<title>Tailnet names · torrent-box</title>
+<link rel="icon" href="{favicon(OK)}">
+<style>{CSS}</style>
+</head><body><div class="wrap">
+<main>
+<p><a href="/">← {e(status["hostname"])}</a></p>
+<h1>Own names on the tailnet</h1>
+{body}
+</main>
+</div><script>{PROBE_SCRIPT}useReachable();</script></body></html>
 """
 
 
@@ -1551,6 +1685,9 @@ class Handler(BaseHTTPRequestHandler):
             kind = "application/json"
         elif path.startswith("/icon/") and (logo := self.status.logos.get(path[6:])):
             body, kind = logo
+        elif path == "/tailscale":
+            body = render_tailscale(self.status.get(), https=self.headers.get("X-Forwarded-Proto") == "https").encode()
+            kind = "text/html; charset=utf-8"
         elif path == "/manifest.webmanifest":
             body, kind = MANIFEST, "application/manifest+json"
         elif path.startswith("/app/") and (icon := webapp_icon(path[5:])):

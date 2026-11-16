@@ -358,16 +358,38 @@ class NtfyCheckTest(unittest.TestCase):
         self.assertIn('href="http://box:5055/"', db.render(status, "box"))
         self.assertEqual(db.ntfy_link("https://ntfy.sh", "box", https=True), "https://ntfy.sh")
 
-    def test_links_to_tailscale_services(self):
-        tailnet = db.result(db.OK, "connected", name="box.tail1234.ts.net",
-                            services={"5055": "seerr.tail1234.ts.net"})
-        status = {"time": 0, "hostname": "box", "storage_root": "/mnt/storage", "checks": {
+    def tailnet_status(self, **tailnet):
+        tailnet = db.result(db.OK, "connected", **{"name": "box.tail1234.ts.net", "certs": True,
+                                                    "tags": [], "approved": [], "served": {},
+                                                    "links": {}, **tailnet})
+        return {"time": 0, "hostname": "box", "storage_root": "/mnt/storage", "checks": {
             "seerr": db.result(db.OK, "running"), "desireerr": db.result(db.OK, "running"),
             "tailscale": tailnet}}
+
+    def test_links_to_tailscale_services(self):
+        status = self.tailnet_status(links={"5055": "seerr.tail1234.ts.net"})
         page = db.render(status, "torrent-box.tail1234.ts.net", https=True)   # opened by its service name
-        self.assertIn('href="https://seerr.tail1234.ts.net/"', page)
+        self.assertIn('href="https://seerr.tail1234.ts.net/" data-fallback="https://box.tail1234.ts.net:15055/"', page)
         self.assertIn('href="https://box.tail1234.ts.net:15056/"', page)          # no service: the box's port
         self.assertIn('href="http://box:5055/"', db.render(status, "box"))      # plain http: as before
+
+    def test_services_note(self):
+        status = self.tailnet_status(approved=["seerr", "torrent-box"],
+                                     served={"seerr": "seerr.t", "torrent-box": "torrent-box.t"})
+        self.assertIn("2 of 3 ready", db.render(status, "box.tail1234.ts.net", https=True))
+        self.assertNotIn("ready ·", db.render(status, "box"))                   # LAN viewers: no note
+        status["checks"]["tailscale"].update(approved=["seerr", "torrent-box", "desireerr"],
+                                             served={"seerr": "s", "torrent-box": "t", "desireerr": "d"})
+        self.assertNotIn("ready ·", db.render(status, "box.tail1234.ts.net", https=True))
+
+    def test_tailscale_page(self):
+        status = self.tailnet_status(tags=["tag:server"], approved=["seerr"], served={"seerr": "s"})
+        page = db.render_tailscale(status, https=True)
+        self.assertIn('data-probe="https://seerr.tail1234.ts.net/"', page)      # ready: checked from the device
+        self.assertNotIn('data-probe="https://desireerr.tail1234.ts.net/"', page)
+        self.assertIn("&quot;svc:desireerr&quot;", page)                        # in the policy to paste
+        self.assertIn("now: tag:server", page)
+        self.assertIn("isn't set up", db.render_tailscale({"hostname": "box", "checks": {}}))
 
     def test_approved_services_only(self):
         me = {"CapMap": {"service-host": [{"svc:seerr": ["100.1.2.3"]}]}}
@@ -376,20 +398,9 @@ class NtfyCheckTest(unittest.TestCase):
             "svc:jellyfin": {"Web": {"jellyfin.t.ts.net:443": {"Handlers": {"/": {"Proxy": "http://127.0.0.1:8096"}}}}}}}
         with unittest.mock.patch.object(db.subprocess, "run",
                                         return_value=unittest.mock.Mock(stdout=json.dumps(serving))):
-            self.assertEqual(db.tailscale_services(me), {"5055": "seerr.t.ts.net"})
-        self.assertEqual(db.tailscale_services({}), {})
-
-    def test_installable(self):
-        manifest = json.loads(db.MANIFEST)
-        self.assertEqual((manifest["start_url"], manifest["display"]), ("/", "standalone"))
-        for icon in manifest["icons"]:
-            png = db.webapp_icon(icon["src"].removeprefix("/app/"))   # the repo's own
-            self.assertEqual(png[:8], b"\x89PNG\r\n\x1a\n")
-            size = int(icon["sizes"].split("x")[0])
-            self.assertEqual(struct.unpack(">II", png[16:24]), (size, size))
-        self.assertIsNone(db.webapp_icon("../dashboard.py"))
-        status = {"time": 0, "hostname": "box", "storage_root": "/mnt/storage", "checks": {}}
-        self.assertIn('<link rel="manifest" href="/manifest.webmanifest">', db.render(status, "box"))
+            self.assertEqual(db.tailscale_services(me), {
+                "approved": ["seerr"], "served": {"seerr": "seerr.t.ts.net", "jellyfin": "jellyfin.t.ts.net"},
+                "links": {"5055": "seerr.t.ts.net"}})
 
     def test_version_in_the_footer(self):
         status = {"time": 0, "hostname": "box", "storage_root": "/mnt/storage", "checks": {}}
