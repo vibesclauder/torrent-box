@@ -274,8 +274,9 @@ Whisparr must keep their login on for everyone (Authentication Required: Enabled
 Phones tell installed web apps apart by name only, not by port, so with the HTTPS ports above
 only one of them can open its links (and it grabs everything on the box's name). Under their
 own names on the tailnet ([Tailscale Services](https://tailscale.com/kb/1552/tailscale-services):
-`https://torrent-box.<tailnet>.ts.net`, `https://seerr.<tailnet>.ts.net`, `desireerr`,
-`jellyfin`), each installs as its own app and the start page's links open them.
+`https://torrent-box.<tailnet>.ts.net`, `https://seerr.<tailnet>.ts.net`, `desireerr`),
+each installs as its own app and the start page's links open them. Not Jellyfin: phones and
+TVs have its own app (keep its port address there).
 
 That takes a few steps in the Tailscale admin console (a tag for the box, the services defined,
 an access rule), which no script can do for you. The start page lists them, with the policy to

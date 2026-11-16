@@ -1086,8 +1086,8 @@ HOST = re.compile(r"(?P<host>\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)
 
 # The apps' own names on the tailnet, as Tailscale Services (svc:<name>), which setup.sh
 # serves once the box is tagged; /tailscale shows the steps. (name, its tile's port; None:
-# the start page.)
-SERVICES = [("torrent-box", None), ("seerr", 5055), ("desireerr", 5056), ("jellyfin", 8096)]
+# the start page.) Not Jellyfin: phones and TVs use its own app.
+SERVICES = [("torrent-box", None), ("seerr", 5055), ("desireerr", 5056)]
 
 
 def wanted_services(checks):

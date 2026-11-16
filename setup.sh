@@ -2099,13 +2099,13 @@ setup_tailscale_https() {
 
 ### 12b. Tailscale Services
 
-# The apps that get their own name: "service:port" for those this box runs; ALL_SERVICES:
-# every one it may serve (the start page's is the box's own name: torrent-box).
+# The apps that get their own name: "service:port" for those this box runs (the start page
+# is torrent-box). Not Jellyfin: phones and TVs use its own app. ALL_SERVICES: every one it
+# may serve, and jellyfin, which it served for a while.
 service_apps() {
     echo "torrent-box:$DASHBOARD_PORT"
     if [[ $arr == yes ]]; then echo "seerr:5055"; fi
     if desireerr_on; then echo "desireerr:$DESIREERR_PORT"; fi
-    if [[ $media_server == jellyfin ]]; then echo "jellyfin:8096"; fi
 }
 ALL_SERVICES="torrent-box seerr desireerr jellyfin"
 
