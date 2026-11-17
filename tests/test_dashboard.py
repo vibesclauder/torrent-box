@@ -39,7 +39,9 @@ class FakeArr:
 
             def do_GET(self):
                 if self.path == "/ping" or self.headers.get("X-Api-Key") == "KEY":
-                    body = b"{}" if self.path == "/ping" else json.dumps(outer.issues).encode()
+                    body = (b"{}" if self.path == "/ping" else
+                            json.dumps({"version": "3.0.2.5780"}).encode()
+                            if self.path.endswith("/system/status") else json.dumps(outer.issues).encode())
                     self.send_response(200)
                 else:
                     body = b""
@@ -353,9 +355,9 @@ class NtfyCheckTest(unittest.TestCase):
             "seerr": db.result(db.OK, "running"),
             "ntfy": db.result(db.OK, "own server, running", server="http://localhost:2586")}}
         page = db.render(status, "box.tail1234.ts.net", https=True)
-        self.assertIn('href="https://box.tail1234.ts.net:15055/"', page)
+        self.assertIn('href="/open/seerr"', page)  # no name of its own: under our bar here too
         self.assertIn('<a href="https://box.tail1234.ts.net:12586/">', page)
-        self.assertIn('href="http://box:5055/"', db.render(status, "box"))
+        self.assertIn('href="/open/seerr"', db.render(status, "box"))  # plain http: under our bar
         self.assertEqual(db.ntfy_link("https://ntfy.sh", "box", https=True), "https://ntfy.sh")
 
     def tailnet_status(self, **tailnet):
@@ -369,9 +371,18 @@ class NtfyCheckTest(unittest.TestCase):
     def test_links_to_tailscale_services(self):
         status = self.tailnet_status(links={"5055": "seerr.tail1234.ts.net"})
         page = db.render(status, "torrent-box.tail1234.ts.net", https=True)   # opened by its service name
-        self.assertIn('href="https://seerr.tail1234.ts.net/" data-fallback="https://box.tail1234.ts.net:15055/"', page)
-        self.assertIn('href="https://box.tail1234.ts.net:15056/"', page)          # no service: the box's port
-        self.assertIn('href="http://box:5055/"', db.render(status, "box"))      # plain http: as before
+        # its own name, so a phone opens its installed app; under our bar where that doesn't answer
+        self.assertIn('href="https://seerr.tail1234.ts.net/" data-fallback="/open/seerr"', page)
+        self.assertIn('href="/open/desireerr"', page)                           # no service: under our bar
+        self.assertIn('href="/open/seerr"', db.render(status, "box"))           # plain http: under our bar
+
+    def test_open_page_over_https(self):
+        status = self.tailnet_status(links={"5055": "seerr.tail1234.ts.net"})
+        page = db.render_open(status, "desireerr", "torrent-box.tail1234.ts.net", https=True)
+        self.assertIn('<iframe src="https://box.tail1234.ts.net:15056/"', page)  # the box's name has the ports
+        self.assertIn('href="https://box.tail1234.ts.net:15056/" target="_blank"', page)
+        self.assertIn('href="https://seerr.tail1234.ts.net/" data-fallback="/open/seerr"', page)
+        self.assertIn("useReachable()", page)
 
     def test_services_note(self):
         status = self.tailnet_status(approved=["seerr", "torrent-box"],
@@ -498,6 +509,13 @@ class ChecksTest(unittest.TestCase):
             c = db.check_transmission(self.settings(server.base_url))
         self.assertEqual(c["state"], db.OK)
         self.assertEqual(c["summary"], "1 downloading, 2 seeding, ↓ 2.0 MB/s ↑ 512.0 KB/s")
+        self.assertEqual(c["version"], "4.1.1 (56442e2929)")
+        self.assertEqual(db.tile_line(c), "↓2.0 MB/s ↑512 kB/s")
+        self.assertEqual(db.tile_line({**c, "rate_down": 0, "rate_up": 0}), "idle")
+        self.assertEqual(db.tile_line({**c, "rate_down": 250 * 1024 ** 2, "rate_up": 100 * 1024 ** 2}),
+                         "↓250 MB/s ↑100 MB/s")  # a 2 Gbit/s line, flat out: still fits
+        self.assertEqual(db.tile_line({**c, "rate_down": 8.4 * 1024 ** 2, "rate_up": 300}),
+                         "↓8.4 MB/s ↑300 B/s")
         self.assertEqual((c["details"], c["upstream"]), ([], ["1 with a tracker warning"]))
 
     @mock.patch.object(db, "service_check", RUNNING)
@@ -524,7 +542,8 @@ class ChecksTest(unittest.TestCase):
             self.assertEqual((c["state"], c["summary"], c["details"]),
                              (db.WARN, "1 issue", ["Indexer nCore is unavailable"]))
             arr.issues = []
-            self.assertEqual(db.check_arr("prowlarr", self.tmp)["summary"], "healthy")
+            c = db.check_arr("prowlarr", self.tmp)
+            self.assertEqual((c["summary"], c["version"]), ("healthy", "3.0.2.5780"))
             # no API key yet: just whether it answers
             (self.tmp / "prowlarr/config.xml").unlink()
             self.assertEqual(db.check_arr("prowlarr", self.tmp)["summary"], "running")
@@ -704,8 +723,8 @@ class PageTest(unittest.TestCase):
 
     def test_render(self):
         page = db.render(self.STATUS, "box.lan")
-        self.assertIn('href="http://box.lan:9091/"', page)
-        self.assertIn('href="http://box.lan:9696/"', page)
+        self.assertIn('href="/open/transmission"', page)
+        self.assertIn('href="/open/prowlarr"', page)
         self.assertNotIn(":8096/", page)  # no Jellyfin check, no tile
         self.assertIn("1 thing needs a look", page)
         self.assertIn("&lt;b&gt;nCore&lt;/b&gt;", page)  # escaped
@@ -755,7 +774,15 @@ class PageTest(unittest.TestCase):
                 base = f"http://127.0.0.1:{httpd.server_address[1]}"
                 with urllib.request.urlopen(base + "/") as resp:
                     self.assertIn("text/html", resp.headers["Content-Type"])
-                    self.assertIn('href="http://127.0.0.1:9091/"', resp.read().decode())
+                    self.assertIn('href="/open/transmission"', resp.read().decode())
+                with urllib.request.urlopen(base + "/open/prowlarr") as resp:
+                    page = resp.read().decode()
+                self.assertIn('<iframe src="http://127.0.0.1:9696/"', page)
+                for path in ("/open/sonarr", "/open/nope"):  # no tile for it
+                    with self.assertRaises(urllib.error.HTTPError) as e:
+                        urllib.request.urlopen(base + path)
+                    e.exception.close()
+                    self.assertEqual(e.exception.code, 404)
                 status.logos = db.Logos({"transmission": [str(Path(tmp) / "t.svg")]})
                 (Path(tmp) / "t.svg").write_text('<svg xmlns="http://www.w3.org/2000/svg"/>')
                 with urllib.request.urlopen(base + "/icon/transmission") as resp:
@@ -770,6 +797,87 @@ class PageTest(unittest.TestCase):
                     urllib.request.urlopen(base + "/../etc/passwd")
                 e.exception.close()
                 self.assertEqual(e.exception.code, 404)
+
+    def test_groups(self):
+        checks = {"jellyfin": db.result(db.OK, "healthy", version="12.4.0"),
+                  "seerr": db.result(db.OK, "running, version 3.5.2", version="3.5.2"),
+                  "desireerr": db.result(db.OK, "running, version 1.3", version="1.3"),
+                  "transmission": db.result(db.OK, "0 downloading, 54 seeding", version="4.1.1 (56442e2929)",
+                                            rate_down=0, rate_up=0),
+                  "sonarr": db.result(db.OK, "healthy", version="4.0.20.3014"),
+                  "prowlarr": db.result(db.OK, "healthy", version="3.0.2.5780")}
+        page = db.render({**self.STATUS, "checks": checks}, "box")
+        labels = [page.index(f"<h3>{label}</h3>") for label in ("Watch", "Request", "Download")]
+        self.assertEqual(labels, sorted(labels))
+        self.assertIn('class="grp g-request wide" style="--n:2"', page)  # its line spans both tiles
+        self.assertIn('--cols:4', page)
+        self.assertIn(">v12.4.0</div>", page)                            # the dot says it's fine
+        self.assertIn('title="0 downloading, 54 seeding · version 4.1.1 (56442e2929)">idle</div>', page)
+        self.assertIn('title="healthy · version 3.0.2.5780">v3.0.2</div>', page)
+        folded = page[page.index('<details class="folded">'):]
+        self.assertIn("all 2 fine", folded)
+        self.assertLess(page.index("Prowlarr"), page.index("<h2>Health</h2>"))
+        self.assertNotIn("<h3>Monitor", page[:page.index('<details class="folded">')])
+        # a problem in the folded group shows on its closed line
+        checks["prowlarr"] = db.result(db.WARN, "1 issue", ["Indexer nCore is unavailable"], version="3.0.2")
+        page = db.render({**self.STATUS, "checks": checks}, "box")
+        summary = page[page.index('<details class="folded">'):page.index("</summary>")]
+        self.assertIn("<b>Prowlarr</b>: 1 issue", summary)
+        self.assertNotIn("all 2 fine", summary)
+        self.assertIn('<i class="dot warn">', summary)
+
+    def test_open_page_bar(self):
+        checks = {cid: db.result(db.OK, "fine") for cid in ("jellyfin", "seerr", "transmission",
+                                                            "sonarr", "prowlarr")}
+        checks["prowlarr"] = db.result(db.DOWN, "not responding")
+        page = db.render_open({**self.STATUS, "checks": checks}, "jellyfin", "box")
+        nav = page[page.index("<nav>"):page.index("</nav>")]
+        self.assertLess(nav.index("<small>Watch</small>"), nav.index("<small>Request</small>"))
+        self.assertIn('<span class="fold">', nav)                        # the folded group, as a menu
+        self.assertIn('<i class="dot down"></i>▾</summary>', nav)       # with what's wrong in it
+        page = db.render_open({**self.STATUS, "checks": checks}, "sonarr", "box")
+        self.assertIn('<summary class="on"', page)                       # its app is open
+
+    def test_open_page(self):
+        status = dict(self.STATUS, logos=["prowlarr"])
+        page = db.render_open(status, "prowlarr", "box.lan")
+        self.assertIn('<a class="home" href="/"', page)                     # back to the start page
+        self.assertIn('<iframe src="http://box.lan:9696/"', page)
+        self.assertIn('href="http://box.lan:9696/" target="_blank"', page)  # open on its own
+        self.assertIn('<a href="/open/prowlarr" class="on"', page)          # the switcher
+        self.assertIn('<a href="/open/transmission"', page)
+        self.assertNotIn("/open/samba", page)                               # health rows aren't apps
+        self.assertIn('<link rel="icon" href="/icon/prowlarr">', page)
+        self.assertIn("<title>Prowlarr · box</title>", page)
+        # Transmission only lets its own origin frame it: through the start page
+        page = db.render_open(status, "transmission", "box.lan")
+        self.assertIn('<iframe src="/transmission/web/"', page)
+        self.assertIn('href="http://box.lan:9091/" target="_blank"', page)
+
+    def test_transmission_passed_through(self):
+        with tempfile.TemporaryDirectory() as tmp, FakeServer() as tr:
+            status = db.Status(Path(tmp) / "config.ini", Path(tmp))
+            db.Handler.status = status
+            httpd = db.Server(("127.0.0.1", 0), db.Handler)
+            threading.Thread(target=httpd.serve_forever, args=(0.01,), daemon=True).start()
+            self.addCleanup(httpd.server_close)
+            self.addCleanup(httpd.shutdown)
+            with mock.patch.object(db, "TRANSMISSION", ("127.0.0.1", tr.httpd.server_address[1])):
+                client = db.Transmission(f"http://127.0.0.1:{httpd.server_address[1]}/transmission/rpc",
+                                         "user", "pass")
+                tr.tr_torrents = [{"name": "x"}]
+                self.assertEqual(client.call("torrent-get", {"fields": ["name"]}),
+                                 {"torrents": [{"name": "x"}]})  # the 409 dance, the login
+                self.assertEqual(tr.requests[-1], ("POST", "/transmission/rpc"))
+                with self.assertRaises(urllib.error.HTTPError) as e:
+                    db.Transmission(client.url, "user", "wrong").call("torrent-get", {})
+                e.exception.close()
+                self.assertEqual(e.exception.code, 401)
+            with mock.patch.object(db, "TRANSMISSION", ("127.0.0.1", 1)):  # nothing there
+                with self.assertRaises(urllib.error.HTTPError) as e:
+                    urllib.request.urlopen(f"http://127.0.0.1:{httpd.server_address[1]}/transmission/web/")
+                e.exception.close()
+                self.assertEqual(e.exception.code, 502)
 
     def test_whisparr_only_when_set_up(self):
         for whisparr in (False, True):

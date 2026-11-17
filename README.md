@@ -93,13 +93,16 @@ with GitHub's `main` to tell you about updates. Updating: `git pull && ./setup.s
 
 ## Start page
 
-`http://<box>/` (port 80, so the box's name is enough) links to the web apps that are set up
-(Jellyfin or minidlna, Seerr, Transmission, Sonarr, Radarr, Whisparr, Desireerr, Prowlarr),
-each with its own logo (taken from the app itself, so nothing is copied into this repo), and
-shows whether each is healthy, plus the storage disk (free space), the nCore feed
-(rss2transmission's last run), the Samba share, Tailscale and the box itself (uptime, load,
-memory, CPU temperature). Anything that needs a look is listed at the top, and the tab's
-icon turns orange or red. It refreshes itself every 20 s (not while you type in it);
+`http://<box>/` (port 80, so the box's name is enough) links to the web apps that are set up,
+in groups: **Watch** (Jellyfin or minidlna), **Request** (Seerr, Desireerr), **Download**
+(Transmission) and **Monitor & grab** (Sonarr, Radarr, Whisparr, Prowlarr: once setup has
+configured them they rarely need you, so they're one folded line, which says when one of them
+has a problem; opened, it stays open on that browser). Each app has its own logo (taken from
+the app itself, so nothing is copied into this repo), a dot for whether it's healthy, and
+its version (Transmission: its speeds, or idle), or what's wrong. Below
+the apps: the storage disk (free space), the nCore feed (rss2transmission's last run), the
+Samba share, Tailscale and the box itself (uptime, load, memory, CPU temperature). Anything
+that needs a look is listed at the top, and the tab's icon turns orange or red. It refreshes itself every 20 s (not while you type in it);
 `http://<box>/status.json` has the same data for scripts.
 
 It also **pushes** what stays wrong for 10 minutes (an app down, the feed failing, Tailscale
@@ -123,7 +126,15 @@ minutes (nCore's login isn't hammered) and only from its own page (another web s
 post codes to it); a code is useless without your password anyway.
 
 The links use the address you opened the page with, so they work by LAN IP, by name and
-through Tailscale alike. The page shows no passwords or keys, but anyone on the LAN (and your
+through Tailscale alike. On `http://<box>/` an app opens **under a bar** (`/open/<app>`): the
+start page's logo back to it, the other apps in their groups to switch to (Monitor & grab as a
+menu), and a link to open the app on its own; the app itself fills the rest of the tab.
+Transmission only lets its own address show it in a frame, so the page passes
+`http://<box>/transmission/` on to it (with its own login, as on port 9091). Over HTTPS (the
+tailnet, phones) an app with its own name on the tailnet (see
+[Tailscale Services](#tailscale-services-an-own-name-for-each-app)) opens by that name, so a
+phone opens its installed app; the others, and those whose name doesn't answer from that
+device, open under the bar too, which keeps an installed start page in its own window. The page shows no passwords or keys, but anyone on the LAN (and your
 tailnet) can see it, like the apps' login pages. Its health comes from each app's own health
 check (Prowlarr's tells you when nCore's session has expired) and from systemd.
 
@@ -263,8 +274,8 @@ page; MagicDNS too); until then setup says so and serves nothing.
 | every app | its own port + 10000: Seerr `:15055`, Desireerr `:15056`, Jellyfin `:18096`, Transmission `:19091`, Sonarr `:18989`, Radarr `:17878`, Prowlarr `:19696`, Whisparr `:16969`, ntfy `:12586` (MiniDLNA's page `:18200`) |
 
 The apps keep their plain http ports on the LAN and the tailnet (HTTPS can't share a port the
-app already listens on, hence the other port). The start page opened over HTTPS links to the
-apps' HTTPS ports, and installs as an app (Chrome's menu → Install app; Safari's Share → Add
+app already listens on, hence the other port). The start page opened over HTTPS shows the
+apps under its bar from their HTTPS ports (or links their own names, below), and installs as an app (Chrome's menu → Install app; Safari's Share → Add
 to Home Screen): its own icon and window. Its icons are drawn by `tools/make_icons.py`. It's tailnet only: nothing is opened to the internet (that would be Funnel).
 The certificate is a public Let's Encrypt one, so the box's tailnet name shows up in
 certificate transparency logs. Tailscale keeps the setup across reboots; `tailscale serve

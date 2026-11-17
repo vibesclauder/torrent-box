@@ -119,6 +119,8 @@ class FakeServer:
                             "percentDone": 0.0, "downloadDir": args["download-dir"],
                             "sizeWhenDone": 1000})
                     reply = {key: {"hashString": info_hash, "id": 1, "name": "x"}}
+                elif req["method"] == "session-get":
+                    reply = {"version": "4.1.1 (56442e2929)"}
                 elif req["method"] == "torrent-get":
                     reply = {"torrents": server.tr_torrents}
                 elif req["method"] == "torrent-remove":

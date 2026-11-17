@@ -20,6 +20,7 @@ import calendar
 import configparser
 import errno
 import html
+import http.client
 import json
 import os
 import re
@@ -85,16 +86,25 @@ WORST = {OK: 0, WARN: 1, DOWN: 2}
 # ports on the tailnet: their own plus HTTPS_OFFSET.
 HTTPS_OFFSET = 10000
 TILES = [
-    ("jellyfin", "Jellyfin", "Watch movies and series", 8096),
-    ("minidlna", "MiniDLNA", "DLNA server status", 8200),
-    ("seerr", "Seerr", "Request movies and series", 5055),
-    ("transmission", "Transmission", "Torrents", 9091),
+    ("jellyfin", "Jellyfin", "Movies and series", 8096),
+    ("minidlna", "MiniDLNA", "DLNA server", 8200),
+    ("seerr", "Seerr", "Movies and series", 5055),
+    ("desireerr", "Desireerr", "Adult content", 5056),
+    ("transmission", "Transmission", "nCore torrents", 9091),
     ("sonarr", "Sonarr", "Series", 8989),
     ("radarr", "Radarr", "Movies", 7878),
     ("whisparr", "Whisparr", "Adult", 6969),
-    ("desireerr", "Desireerr", "Request adult content", 5056),
     ("prowlarr", "Prowlarr", "nCore search", 9696),
 ]
+# The tiles in groups (the group says what for, the tile what's in it). The last one is the
+# apps setup.sh configures and nobody needs day to day: folded away on the page and in the bar.
+GROUPS = [
+    ("Watch", ("jellyfin", "minidlna")),
+    ("Request", ("seerr", "desireerr")),
+    ("Download", ("transmission",)),
+    ("Monitor & grab", ("sonarr", "radarr", "whisparr", "prowlarr")),
+]
+FOLDED = GROUPS[-1][1]
 # The health rows: (check id, name)
 ROWS = [
     ("storage", "Storage"),
@@ -266,6 +276,7 @@ class Transmission:
         self.url = url
         self.auth = "Basic " + base64.b64encode(f"{user}:{password}".encode()).decode()
         self.session_id = ""
+        self.version = None
 
     def call(self, method, arguments):
         body = json.dumps({"method": method, "arguments": arguments}).encode()
@@ -306,6 +317,11 @@ def check_transmission(s):
     seeding = sum(t["status"] in (5, 6) for t in torrents)
     down = sum(t["rateDownload"] for t in torrents)
     up = sum(t["rateUpload"] for t in torrents)
+    try:  # for the tile; changes only with an upgrade, which restarts the daemon
+        version = tr.version or tr.call("session-get", {"fields": ["version"]}).get("version")
+        tr.version = version
+    except (OSError, ValueError):
+        version = None
     parts = [f"{downloading} downloading", f"{seeding} seeding"]
     if down or up:
         parts.append(f"↓ {human_size(down)}/s ↑ {human_size(up)}/s")
@@ -316,7 +332,8 @@ def check_transmission(s):
         details.append(f"… and {len(broken) - 5} more")
     tracker = sum(t["error"] in (1, 2) for t in torrents)
     upstream = [f"{tracker} with a tracker warning"] if tracker else []
-    return result(WARN if broken else OK, ", ".join(parts), details, upstream)
+    return result(WARN if broken else OK, ", ".join(parts), details, upstream,
+                  version=version, rate_down=down, rate_up=up)
 
 
 def check_jellyfin(s):
@@ -327,7 +344,11 @@ def check_jellyfin(s):
         health = http_get("http://127.0.0.1:8096/health").decode().strip()
     except OSError as e:
         return result(WARN, f"running, but {problem(e)}")
-    return result(OK if health == "Healthy" else WARN, health.lower() or "no answer")
+    try:
+        version = json.loads(http_get("http://127.0.0.1:8096/System/Info/Public")).get("Version")
+    except (OSError, ValueError, AttributeError):
+        version = None
+    return result(OK if health == "Healthy" else WARN, health.lower() or "no answer", version=version)
 
 
 def check_minidlna(s):
@@ -372,22 +393,28 @@ def api_key(config_xml):
 
 
 def check_arr(name, arr_dir):
-    port, version = ARR_APPS[name]
+    port, api = ARR_APPS[name]
     key = api_key(Path(arr_dir) / name / "config.xml")
     try:
         if not key:  # can't read its health without it; is it up at all?
             http_get(f"http://127.0.0.1:{port}/ping")
             return result(OK, "running")
-        issues = json.loads(http_get(f"http://127.0.0.1:{port}/api/{version}/health",
+        issues = json.loads(http_get(f"http://127.0.0.1:{port}/api/{api}/health",
                                      {"X-Api-Key": key}))
     except (OSError, ValueError) as e:
         return result(DOWN, problem(e))
     issues = [i for i in issues if i.get("type") in ("warning", "error")]
     elsewhere = [i.get("message", "?") for i in issues if upstream_issue(name, i)]
     issues = [i.get("message", "?") for i in issues if not upstream_issue(name, i)]
+    try:
+        version = json.loads(http_get(f"http://127.0.0.1:{port}/api/{api}/system/status",
+                                      {"X-Api-Key": key})).get("version")
+    except (OSError, ValueError, AttributeError):
+        version = None
     if not issues:
-        return result(OK, "healthy", upstream=elsewhere)
-    return result(WARN, f"{len(issues)} issue{'s' if len(issues) > 1 else ''}", issues, elsewhere)
+        return result(OK, "healthy", upstream=elsewhere, version=version)
+    return result(WARN, f"{len(issues)} issue{'s' if len(issues) > 1 else ''}", issues, elsewhere,
+                  version=version)
 
 
 # Health checks of Sonarr, Radarr and Whisparr that report on something else: their
@@ -644,9 +671,9 @@ def check_seerr(s):
     except (OSError, ValueError):
         return result(OK, f"running, version {seerr_version or '?'}",
                       ["its update check isn't getting an answer from GitHub; "
-                       "requests and everything else work"])
+                       "requests and everything else work"], version=seerr_version)
     seerr_version = status.get("version", "?")
-    return result(OK, f"running, version {seerr_version}")
+    return result(OK, f"running, version {seerr_version}", version=seerr_version)
 
 
 def check_desireerr(s):
@@ -657,7 +684,7 @@ def check_desireerr(s):
     if status.get("setup_needed"):
         return result(WARN, "waiting for its first sign-in",
                       ["the setup code is in ~/.local/state/desireerr/setup-code"])
-    return result(OK, f"running, version {status.get('version', '?')}")
+    return result(OK, f"running, version {status.get('version', '?')}", version=status.get("version"))
 
 
 def check_rss2transmission(s, now=None):
@@ -1109,15 +1136,12 @@ def services_note(checks, https):
 
 
 def app_url(host, port, https=False, tailnet=None):
-    """A tile's link: the app's port on the host the page was opened with; over HTTPS, the app's
+    """An app on its own: its port on the host the page was opened with; over HTTPS, the app's
     own Tailscale Service if it has one, else its HTTPS port on the box's tailnet name. TAILNET:
     the tailscale check's result (name, services)."""
     tailnet = tailnet or {}
-    if not https:
-        return f"http://{html.escape(host)}:{port}/"
-    # the page may be opened by its own service name, which has none of the apps' ports
-    by_port = f"https://{html.escape(tailnet.get('name') or host)}:{port + HTTPS_OFFSET}/"
-    if service := (tailnet.get("links") or {}).get(str(port)):
+    by_port = port_url(host, port, https, tailnet)
+    if https and (service := (tailnet.get("links") or {}).get(str(port))):
         # the script falls back to the port where this device can't reach the service
         return f'https://{html.escape(service)}/" data-fallback="{by_port}'
     return by_port
@@ -1245,7 +1269,30 @@ border:1px solid var(--line);border-left:5px solid var(--warn)}
 .banner.update{border-left-color:var(--accent)}
 .banner code{font-size:13px}
 .banner ul{margin:6px 0 0;padding-left:20px}
-.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:12px}
+.groups{display:grid;grid-template-columns:repeat(var(--cols),minmax(0,1fr));gap:12px}
+.grp{grid-column:span var(--n);display:grid;grid-template-columns:subgrid;row-gap:8px;align-content:start}
+.grp h3,.folded h3{font-size:11px;font-weight:650;text-transform:uppercase;letter-spacing:.09em;
+color:var(--muted);margin:0;white-space:nowrap}
+.grp h3{grid-column:1/-1;padding:0 4px 5px;border-bottom:2px solid color-mix(in srgb,var(--accent) 30%%,var(--line))}
+.line{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-variant-numeric:tabular-nums}
+.folded{margin-top:14px;background:var(--card);border:1px solid var(--line);border-radius:14px;box-shadow:var(--shadow)}
+.folded summary{display:flex;align-items:center;flex-wrap:wrap;gap:8px 12px;margin:0;padding:10px 16px;list-style:none}
+.folded summary::-webkit-details-marker{display:none}
+.chev{color:var(--muted);font-size:18px;line-height:1;transition:transform .15s}
+.folded[open] .chev{transform:rotate(90deg)}
+.faces{display:flex;gap:8px}
+.face{position:relative;display:grid}
+.face .logo,.face .badge{width:22px;height:22px;border-radius:6px}.face .badge svg{width:13px;height:13px}
+.face .dot{position:absolute;right:-3px;bottom:-3px;width:8px;height:8px;box-shadow:0 0 0 2px var(--card)}
+.face .dot.ok{display:none}
+.wrong{display:flex;align-items:center;flex-wrap:wrap;gap:4px 10px;font-size:13px;color:var(--down)}
+.wrong svg{width:16px;height:16px}
+.folded .apps{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:2px 10px;
+padding:6px 10px 10px;border-top:1px solid var(--line)}
+.app{display:flex;gap:10px;align-items:center;padding:8px;border-radius:10px;color:inherit;text-decoration:none}
+.app:hover{background:var(--soft)}
+.app>div{flex:1;min-width:0;font-size:14px}.app .line{font-size:12px}
+.app .logo,.app .badge{width:30px;height:30px;border-radius:8px}.app .badge svg{width:17px;height:17px}
 .tile{display:flex;gap:14px;align-items:flex-start;padding:16px;background:var(--card);
 border:1px solid var(--line);border-radius:14px;color:inherit;text-decoration:none;
 box-shadow:var(--shadow);transition:transform .12s,border-color .12s}
@@ -1309,6 +1356,13 @@ footer{margin-top:30px;color:var(--muted);font-size:12px;display:flex;justify-co
 flex-wrap:wrap;gap:6px}
 @media (max-width:600px){.row{grid-template-columns:1fr}.row>div:last-child{padding-top:0}
 .word{font-size:22px}}
+.many .tile{flex-direction:column;gap:10px;padding:14px}
+@media (max-width:860px){.tile{flex-direction:column;gap:10px;padding:14px}.tile b{font-size:16px}}
+@media (max-width:640px){
+.groups{grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+.grp{grid-column:span 1;order:2}.grp.wide{grid-column:span 2}
+.g-watch{order:0}.g-download{order:1}
+.why{display:none}.folded .apps{grid-template-columns:1fr}}
 """ % BRAND
 
 
@@ -1333,6 +1387,16 @@ function useReachable(){
 
 SCRIPT = PROBE_SCRIPT + """
 useReachable();
+function unfold(){  // the folded group stays open on this browser once opened
+  let open=false;
+  try{open=localStorage.getItem("torrent-box.folded")==="open";}catch(e){}
+  for(const d of document.querySelectorAll("details.folded"))d.open=open;
+}
+unfold();
+document.addEventListener("toggle",ev=>{
+  if(!ev.target.matches?.("details.folded"))return;
+  try{localStorage.setItem("torrent-box.folded",ev.target.open?"open":"closed");}catch(e){}
+},true);
 function localTimes(){  // the box's times in the viewer's time zone
   for(const t of document.querySelectorAll("time[datetime]")){
     t.title=t.textContent;
@@ -1341,7 +1405,7 @@ function localTimes(){  // the box's times in the viewer's time zone
 }
 localTimes();
 function busy(){  // don't swap the page under someone typing a code
-  return document.querySelector("main details[open], main .alert.open")||
+  return document.querySelector("main details[open]:not(.folded), main .alert.open")||
     [...document.querySelectorAll("main input")].some(i=>i.value)||
     document.activeElement?.closest?.("main form");
 }
@@ -1351,6 +1415,7 @@ async function refresh(){
     const r=await fetch(location.href,{cache:"no-store"});
     const page=new DOMParser().parseFromString(await r.text(),"text/html");
     document.querySelector("main").replaceWith(page.querySelector("main"));
+    unfold();
     localTimes();
     useReachable();
     document.title=page.title;
@@ -1397,6 +1462,239 @@ def alert_html(kind, heading, items):
             f'{glyph(ALERT_ICON, "currentColor")}<span class="tip"><b>{heading}</b><ul>{lis}</ul></span></span>')
 
 
+def app_badge(cid, status, size=44):
+    """A tile's picture: the app's own logo, or a glyph of ours in its colors."""
+    if cid in status.get("logos", ()):
+        return f'<img class="logo" src="/icon/{cid}" alt="" width="{size}" height="{size}">'
+    colors, paths = APP_ICONS[cid]
+    return (f'<span class="badge" style="background:linear-gradient(135deg,{colors})">'
+            f'{glyph(paths, "#fff")}</span>')
+
+
+def short_version(version):
+    """"4.1.1 (56442e2929)", "3.0.2.5780" -> "v4.1.1", "v3.0.2" (the rest is on hover)."""
+    return "v" + ".".join(str(version).split()[0].split(".")[:3])
+
+
+def short_speed(n):
+    """Bytes/s as short as a tile needs: "↓250 MB/s ↑100 MB/s" just fits."""
+    for unit in ("B", "kB", "MB"):
+        if n < 1000 or unit == "MB":
+            return f"{n:.1f} {unit}/s" if n < 10 and unit != "B" else f"{n:.0f} {unit}/s"
+        n /= 1024
+    return ""
+
+
+def tile_line(c):
+    """A tile's last line: the app's version while it's fine (its dot says that much), or what
+    is wrong; Transmission's is its speeds, or idle (the version and counts are on hover)."""
+    if c["state"] != OK:
+        return c["summary"]
+    if "rate_down" in c:
+        if not (c["rate_down"] or c["rate_up"]):
+            return "idle"
+        return f'↓{short_speed(c["rate_down"])} ↑{short_speed(c["rate_up"])}'
+    return short_version(c["version"]) if c.get("version") else c["summary"]
+
+
+def tile_title(c):
+    version = c.get("version")
+    return c["summary"] + (f" · version {version}" if version and version not in c["summary"] else "")
+
+
+def tile_href(cid, port, https=False, tailnet=None):
+    """Plain HTTP: the app under our bar (/open/). Over HTTPS an app with its own name on the
+    tailnet links there, so a phone opens its installed app; where that name doesn't answer
+    (PROBE_SCRIPT), and for the other apps, under our bar too, which keeps an installed start
+    page in its own window."""
+    if https and (service := ((tailnet or {}).get("links") or {}).get(str(port))):
+        return f'https://{html.escape(service)}/" data-fallback="/open/{cid}'
+    return f"/open/{cid}"
+
+
+TILE = {cid: (name, purpose, port) for cid, name, purpose, port in TILES}
+
+
+def tile_html(cid, status, https, tailnet):
+    e = html.escape
+    name, purpose, port = TILE[cid]
+    c = status["checks"][cid]
+    return (f'<a class="tile" href="{tile_href(cid, port, https, tailnet)}">{app_badge(cid, status)}<div>'
+            f'<div class="name"><b>{name}</b><span class="flags">'
+            f'{alert_html("own", "Its own problems", c["details"])}'
+            f'{alert_html("upstream", "Not its own problem", c["upstream"])}'
+            f'<span class="dot {c["state"]}" title="{c["state"]}"></span></span></div>'
+            f'<div class="muted">{purpose}</div><div class="line" title="{e(tile_title(c))}">'
+            f'{e(tile_line(c))}</div></div></a>')
+
+
+def folded_html(status, https, tailnet):
+    """The last group (FOLDED): one line, closed until opened (the script remembers that), with
+    whatever is wrong in it on that line."""
+    e = html.escape
+    checks = status["checks"]
+    ids = [cid for cid in FOLDED if cid in checks]
+    if not ids:
+        return ""
+    faces, apps, wrong = [], [], []
+    for cid in ids:
+        name, purpose, port = TILE[cid]
+        c = checks[cid]
+        badge = app_badge(cid, status, 22)
+        faces.append(f'<span class="face" title="{name}">{badge}<i class="dot {c["state"]}"></i></span>')
+        if c["state"] != OK:
+            wrong.append(f"<span><b>{name}</b>: {e(c['summary'])}</span>")
+        apps.append(
+            f'<a class="app" href="{tile_href(cid, port, https, tailnet)}">{app_badge(cid, status, 30)}'
+            f'<div><b>{name}</b> <span class="muted">{purpose}</span>'
+            f'<div class="line muted" title="{e(tile_title(c))}">{e(tile_line(c))}</div></div>'
+            f'<span class="flags">{alert_html("own", "Its own problems", c["details"])}'
+            f'{alert_html("upstream", "Not its own problem", c["upstream"])}'
+            f'<span class="dot {c["state"]}" title="{c["state"]}"></span></span></a>')
+    if wrong:
+        state = (f'<span class="wrong">{glyph(ALERT_ICON, "currentColor")}'
+                 f'{" · ".join(wrong)}</span>')
+    else:
+        state = (f'<span class="muted">all {len(ids)} fine<span class="why"> · rarely needed once '
+                 f'setup.sh has set them up</span></span>')
+    return (f'<details class="folded"><summary><span class="chev">›</span><h3>{e(GROUPS[-1][0])}</h3>'
+            f'<span class="faces">{"".join(faces)}</span>{state}</summary>'
+            f'<div class="apps">{"".join(apps)}</div></details>')
+
+
+# Transmission only lets its own origin frame its web UI: /open/transmission shows it through
+# the start page, which passes /transmission/ on to it (its login and session header included).
+TRANSMISSION = ("127.0.0.1", 9091)
+PROXY_MAX = 32 << 20  # a .torrent file added in its web UI comes in the request
+PROXY_HEADERS = ("Authorization", "X-Transmission-Session-Id", "Content-Type", "Accept",
+                 "If-None-Match", "If-Modified-Since")
+HOP_HEADERS = {"connection", "keep-alive", "transfer-encoding", "te", "trailer", "upgrade",
+               "content-length", "date", "server"}
+
+OPEN_CSS = """
+:root{color-scheme:light dark;--bar:#fff;--fg:#1b1f2e;--muted:#646b80;--line:#e3e5ee;--hover:#eef0fb;
+--ok:#1f9d55;--warn:#d98a00;--down:#d64545}
+@media (prefers-color-scheme:dark){:root{--bar:#171a24;--fg:#e7e9f2;--muted:#9aa1b5;--line:#272b3a;--hover:#20243a}}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0}
+body{display:flex;flex-direction:column;background:var(--bar);color:var(--fg);
+font:14px/1.3 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+nav{display:flex;align-items:center;gap:4px;height:48px;padding:0 8px;flex:none;position:relative;
+background:var(--bar);border-bottom:1px solid var(--line)}
+nav a,nav summary{display:flex;align-items:center;gap:7px;color:inherit;text-decoration:none;
+border-radius:8px;padding:4px 6px;cursor:pointer}
+nav a:hover,nav summary:hover{background:var(--hover)}
+nav img,nav svg,.badge{width:26px;height:26px;flex:none}
+.home svg{width:28px;height:28px}
+.badge{border-radius:7px;display:grid;place-items:center}.badge svg{width:15px;height:15px}
+.home b{font-weight:750;letter-spacing:-.01em}
+.sep{width:1px;height:22px;background:var(--line);margin:0 4px;flex:none}
+.apps{display:flex;align-items:center;gap:2px;flex:1;min-width:0}
+.grp{display:flex;align-items:center;gap:1px}
+.grp small,.folded small{font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);
+margin-right:4px;white-space:nowrap}
+.grp>a{position:relative;opacity:.6}.grp>a:hover,.grp>a.on{opacity:1}
+a.on,summary.on{background:var(--hover)}
+.name{display:none}.on>.name{display:inline;font-weight:600}
+.dot{display:inline-block;width:8px;height:8px;border-radius:50%;flex:none;box-shadow:0 0 0 2px var(--bar)}
+.dot.ok{background:var(--ok)}.dot.warn{background:var(--warn)}.dot.down{background:var(--down)}
+nav .dot{position:absolute;top:2px;left:26px}nav .dot.ok{display:none}.menu .dot{position:static;box-shadow:none}
+.folded{position:relative}
+.folded summary{list-style:none;position:relative;color:var(--muted)}
+.folded summary::-webkit-details-marker{display:none}
+.fold{display:grid;grid-template-columns:1fr 1fr;gap:2px;width:26px;height:26px;padding:2px;
+border-radius:7px;background:var(--hover);flex:none}
+.fold img,.fold .badge,.fold svg{width:10px;height:10px;border-radius:2px}.fold .badge svg{width:7px;height:7px}
+.menu{position:absolute;top:calc(100% + 8px);left:0;z-index:5;min-width:270px;padding:6px;
+background:var(--bar);border:1px solid var(--line);border-radius:12px;box-shadow:0 10px 30px rgba(0,0,0,.25)}
+.menu a{display:flex;align-items:center;gap:10px;padding:7px 8px}
+.menu a>span{display:flex;flex-direction:column;flex:1;min-width:0}
+.menu small{color:var(--muted);font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.own{color:var(--muted);white-space:nowrap;margin-left:auto}
+.own:hover{color:var(--fg)}
+iframe{flex:1;width:100%;border:0;display:block}
+@media (max-width:640px){.home b,.own span,.grp small,.folded small,summary.on>.name{display:none}
+.folded{position:static}.menu{left:auto;right:8px}}
+"""
+
+
+def port_url(host, port, https=False, tailnet=None):
+    """The app on its own port, on the host the page was opened with; over HTTPS its HTTPS port
+    on the box's tailnet name (the page may be opened by its own service name, which has none
+    of the apps' ports)."""
+    if not https:
+        return f"http://{html.escape(host)}:{port}/"
+    return f"https://{html.escape((tailnet or {}).get('name') or host)}:{port + HTTPS_OFFSET}/"
+
+
+def frame_src(cid, host, port, https=False, tailnet=None):
+    if cid == "transmission":
+        return "/transmission/web/"
+    return port_url(host, port, https, tailnet)
+
+
+def render_open(status, cid, host, https=False):
+    """/open/<app>: the app in a frame under a bar with the logo back to the start page, the
+    apps in their GROUPS to switch to (the folded group as a menu) and a link to open it on its
+    own. The links go where the start page's tiles go (tile_href)."""
+    e = html.escape
+    checks = status["checks"]
+    tailnet = checks.get("tailscale")
+    name, _, port = TILE[cid]
+
+    def link(other, inside, size=26):
+        n, _, p = TILE[other]
+        current = ' class="on" aria-current="page"' if other == cid else ""
+        return (f'<a href="{tile_href(other, p, https, tailnet)}"{current} title="{e(n)}">'
+                f'{app_badge(other, status, size)}{inside}'
+                f'<i class="dot {checks[other]["state"]}"></i></a>')
+
+    parts = []
+    for label, ids in GROUPS[:-1]:
+        links = [link(other, f'<span class="name">{e(TILE[other][0])}</span>')
+                 for other in ids if other in checks]
+        if links:
+            parts.append(f'<div class="grp"><small>{label}</small>{"".join(links)}</div>')
+    folded = [other for other in FOLDED if other in checks]
+    if folded:
+        worst = max((checks[o]["state"] for o in folded), key=WORST.get)
+        if cid in folded:
+            face = f'{app_badge(cid, status, 26)}<span class="name">{e(name)}</span>'
+        else:
+            face = f'<span class="fold">{"".join(app_badge(o, status, 10) for o in folded[:4])}</span>'
+        items = "".join(
+            link(o, f'<span><b>{e(TILE[o][0])}</b><small>{e(TILE[o][1])} · '
+                    f'{e(tile_line(checks[o]))}</small></span>', 24) for o in folded)
+        on = ' class="on"' if cid in folded else ""
+        parts.append(
+            f'<details class="folded"><summary{on} title="{e(GROUPS[-1][0])}"><small>{e(GROUPS[-1][0])}</small>{face}'
+            f'<i class="dot {worst}"></i>▾</summary><div class="menu">{items}</div></details>')
+    icon = f"/icon/{cid}" if cid in status.get("logos", ()) else favicon(OK)
+    return f"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{e(name)} · {e(status["hostname"])}</title>
+<link rel="icon" href="{icon}">
+<style>{OPEN_CSS}</style>
+</head><body>
+<nav><a class="home" href="/" title="Back to the start page">{logo_svg("logo")}<b>torrentbox</b></a>
+<span class="sep"></span><div class="apps">{'<span class="sep"></span>'.join(parts)}</div>
+<a class="own" href="{app_url(host, port, https, tailnet)}" target="_blank" rel="noopener" title="Open {e(name)} on its own">
+<span>Open on its own</span> ↗</a></nav>
+<iframe src="{frame_src(cid, host, port, https, tailnet)}" title="{e(name)}" allow="fullscreen; autoplay; clipboard-read; clipboard-write"></iframe>
+<script>{OPEN_SCRIPT}</script>
+</body></html>
+"""
+
+
+OPEN_SCRIPT = PROBE_SCRIPT + """
+useReachable();
+document.addEventListener("click",ev=>{  // a click elsewhere closes the menu
+  for(const d of document.querySelectorAll("details.folded[open]"))if(!d.contains(ev.target))d.open=false;
+});
+"""
+
+
 def render(status, host, https=False):
     e = html.escape
     checks = status["checks"]
@@ -1424,24 +1722,16 @@ def render(status, host, https=False):
                    f'<div class="muted">To update, on the box: <code>{e(update_command())}</code>'
                    f' · <a href="{e(update["url"])}">what changed</a></div></div>')
 
-    tiles = []
-    for cid, name, purpose, port in TILES:
-        if cid not in checks:
-            continue
-        c = checks[cid]
-        if cid in status.get("logos", ()):
-            badge = f'<img class="logo" src="/icon/{cid}" alt="" width="44" height="44">'
-        else:
-            colors, paths = APP_ICONS[cid]
-            badge = (f'<span class="badge" style="background:linear-gradient(135deg,{colors})">'
-                     f'{glyph(paths, "#fff")}</span>')
-        tiles.append(
-            f'<a class="tile" href="{app_url(host, port, https, checks.get("tailscale"))}">{badge}<div>'
-            f'<div class="name"><b>{name}</b><span class="flags">'
-            f'{alert_html("own", "Its own problems", c["details"])}'
-            f'{alert_html("upstream", "Not its own problem", c["upstream"])}'
-            f'<span class="dot {c["state"]}" title="{c["state"]}"></span></span></div>'
-            f'<div class="muted">{purpose}</div><div>{e(c["summary"])}</div></div></a>')
+    tailnet = checks.get("tailscale")
+    shown = [cid for cid, *_ in TILES if cid in checks]
+    groups = []
+    for label, ids in GROUPS[:-1]:
+        cards = [tile_html(cid, status, https, tailnet) for cid in ids if cid in shown]
+        if cards:
+            groups.append(f'<section class="grp g-{label.lower()}{" wide" if len(cards) > 1 else ""}" '
+                          f'style="--n:{len(cards)}"><h3>{label}</h3>{"".join(cards)}</section>')
+    main_count = sum(cid not in FOLDED for cid in shown)
+    folded = folded_html(status, https, tailnet)
 
     rows = []
     for cid, name in ROWS:
@@ -1502,7 +1792,8 @@ def render(status, host, https=False):
 {banner}
 <h2>Apps</h2>
 {services_note(checks, https)}
-<div class="grid">{"".join(tiles)}</div>
+<div class="groups{" many" if main_count > 4 else ""}" style="--cols:{max(main_count, 3)}">{"".join(groups)}</div>
+{folded}
 <h2>Health</h2>
 <div class="rows">{"".join(rows)}</div>
 <footer><span id="updated">Updated {updated}, refreshes every {REFRESH_SECONDS} s.</span>
@@ -1688,6 +1979,15 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/tailscale":
             body = render_tailscale(self.status.get(), https=self.headers.get("X-Forwarded-Proto") == "https").encode()
             kind = "text/html; charset=utf-8"
+        elif path.startswith("/open/") and path[6:] in self.status.get()["checks"] \
+                and any(t[0] == path[6:] for t in TILES):
+            body = render_open(self.status.get(), path[6:],
+                               link_host(self.headers.get("Host"), socket.gethostname()),
+                               https=self.headers.get("X-Forwarded-Proto") == "https").encode()
+            kind = "text/html; charset=utf-8"
+        elif path == "/transmission" or path.startswith("/transmission/"):
+            self.proxy_transmission()
+            return
         elif path == "/manifest.webmanifest":
             body, kind = MANIFEST, "application/manifest+json"
         elif path.startswith("/app/") and (icon := webapp_icon(path[5:])):
@@ -1708,7 +2008,37 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def proxy_transmission(self, body=None):
+        headers = {k: v for k in PROXY_HEADERS if (v := self.headers.get(k)) is not None}
+        conn = http.client.HTTPConnection(*TRANSMISSION, timeout=60)
+        try:
+            conn.request(self.command, self.path, body, headers)
+            resp = conn.getresponse()
+            data = resp.read()
+        except OSError as e:
+            self.send_error(502, f"Transmission doesn't answer: {problem(e)}")
+            return
+        finally:
+            conn.close()
+        self.send_response(resp.status, resp.reason)
+        for k, v in resp.getheaders():
+            if k.lower() not in HOP_HEADERS:
+                self.send_header(k, v)
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
     def do_POST(self):
+        if self.path.startswith("/transmission/"):
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+            except ValueError:
+                length = -1
+            if not 0 <= length <= PROXY_MAX:
+                self.send_error(413 if length > PROXY_MAX else 400)
+                return
+            self.proxy_transmission(self.rfile.read(length))
+            return
         if self.path != "/ncore-code" or not load_settings(self.status.config)["arr"]:
             self.send_error(404)
             return
