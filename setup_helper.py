@@ -916,7 +916,7 @@ def jellyfin_xxx_library(user, password, roots, name="XXX", base=JELLYFIN):
                 yield f"library {f['Name']}: added {root}"
         kind = f.get("CollectionType") or "mixed"
         if kind == "homevideos":
-            yield f"library {f['Name']} (Home videos and photos): {', '.join(roots)}"
+            yield f"library {f['Name']} (Home videos and photos): already has {', '.join(roots)}"
         else:
             yield (f"warning: library {f['Name']} has Whisparr's folders as {kind}: its videos can "
                    "come up in the random button; make it Home videos and photos (remove it, "
@@ -930,7 +930,7 @@ def jellyfin_xxx_library(user, password, roots, name="XXX", base=JELLYFIN):
     http_json("POST", f"{base}/Library/VirtualFolders?{query}",
               {"LibraryOptions": {"EnableRealtimeMonitor": True, "EnablePhotos": False}},
               headers=auth)
-    yield f"library {name} (Home videos and photos): {', '.join(roots)}"
+    yield f"library {name} (Home videos and photos) added: {', '.join(roots)}"
 
 
 ### Jellyfin: hardware transcoding

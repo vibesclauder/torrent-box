@@ -1,0 +1,11 @@
+# Hourly: asks the Docker apps whether a new version is out, and updates the ones that say so
+# (torrent-box-arr-update-check.service). The weekly update still takes everything.
+[Unit]
+Description=torrent-box: hourly check for new versions of the Docker apps
+
+[Timer]
+OnCalendar=hourly
+RandomizedDelaySec=10min
+
+[Install]
+WantedBy=timers.target

@@ -1306,15 +1306,36 @@ class SmartdConfTest(unittest.TestCase):
 class ArrUpdateTest(unittest.TestCase):
     """templates/arr-update with a fake docker: which apps got a new image."""
 
-    def run_update(self, pull_fails=False):
+    def run_update(self, pull_fails=False, *args):
         tmp = Path(self.tmpdir.name)
         (tmp / "pushes").write_text("")
-        result = subprocess.run(["bash", str(REPO / "templates/arr-update"), "compose.yml"],
+        result = subprocess.run(["bash", str(REPO / "templates/arr-update"),
+                                 str(tmp / "compose.yml"), *args],
                                 capture_output=True, text=True,
                                 env={**os.environ, "PATH": f"{tmp}:{os.environ['PATH']}",
                                      "TORRENT_BOX_PUSH": str(tmp / "push"),
+                                     "TORRENT_BOX_LOCK": str(tmp / "lock"),
+                                     "TORRENT_BOX_APPS_URL": "http://apps",
                                      "PULL_FAILS": "1" if pull_fails else ""})
         return result, (tmp / "pushes").read_text()
+
+    def outdated(self, *apps):
+        """The apps' answers: those named report a new version (fake curl)."""
+        tmp = Path(self.tmpdir.name)
+        (tmp / "sonarr").mkdir()
+        (tmp / "sonarr" / "config.xml").write_text("<Config>\n  <ApiKey>k1</ApiKey>\n</Config>\n")
+        (tmp / "radarr").mkdir()
+        (tmp / "radarr" / "config.xml").write_text("<Config>\n  <ApiKey>k2</ApiKey>\n</Config>\n")
+        health = {name: '[{"source": "UpdateCheck", "type": "warning"}]' if name in apps else "[]"
+                  for name in ("sonarr", "radarr")}
+        (tmp / "curl").write_text(f"""#!/bin/bash
+case "$*" in
+  *"X-Api-Key: k1 http://apps:8989/api/v3/health") echo '{health["sonarr"]}' ;;
+  *"X-Api-Key: k2 http://apps:7878/api/v3/health") echo '{health["radarr"]}' ;;
+  *) exit 22 ;;
+esac
+""")
+        (tmp / "curl").chmod(0o755)
 
     def setUp(self):
         self.tmpdir = tempfile.TemporaryDirectory()
@@ -1325,8 +1346,8 @@ class ArrUpdateTest(unittest.TestCase):
         (tmp / "docker").write_text(f"""#!/bin/bash
 case "$*" in
   *"config --services") printf 'sonarr\\nradarr\\n' ;;
-  *"pull --quiet") [[ -z $PULL_FAILS ]] ;;
-  *"up -d"*) [[ ! -f {tmp}/pulled ]] || cp {tmp}/pulled {tmp}/images ;;
+  *"pull --quiet"*) echo "$*" >>{tmp}/calls; [[ -z $PULL_FAILS ]] ;;
+  *"up -d"*) echo "$*" >>{tmp}/calls; [[ ! -f {tmp}/pulled ]] || cp {tmp}/pulled {tmp}/images ;;
   inspect*) grep "^${{@: -1}}=" {tmp}/images | cut -d= -f2 ;;
   "image prune -f") ;;
   *) echo "unexpected: $*" >&2; exit 9 ;;
@@ -1350,6 +1371,35 @@ esac
         result, pushes = self.run_update(pull_fails=True)
         self.assertEqual(result.returncode, 1)
         self.assertIn("App update failed|couldn't download the new images", pushes)
+
+    def calls(self):
+        path = Path(self.tmpdir.name) / "calls"
+        return path.read_text().splitlines() if path.exists() else []
+
+    def test_if_outdated_nothing_says_so(self):
+        self.outdated()
+        result, pushes = self.run_update(False, "--if-outdated")
+        self.assertEqual((result.returncode, result.stdout, pushes), (0, "", ""))
+        self.assertEqual(self.calls(), [])  # nothing pulled
+
+    def test_if_outdated_updates_only_that_app(self):
+        self.outdated("radarr")
+        (Path(self.tmpdir.name) / "pulled").write_text("sonarr=sha256:a\nradarr=sha256:NEW\n")
+        result, pushes = self.run_update(False, "--if-outdated")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(all(c.endswith(" radarr") for c in self.calls()), self.calls())
+        self.assertEqual(pushes, "Apps updated|New versions running: radarr\n")
+
+    def test_if_outdated_image_not_out_yet(self):
+        self.outdated("sonarr")
+        result, pushes = self.run_update(False, "--if-outdated")
+        self.assertEqual((result.returncode, pushes), (0, ""))
+        self.assertIn("no new image yet: sonarr", result.stdout)
+
+    def test_if_outdated_failure_not_pushed(self):
+        self.outdated("sonarr")
+        result, pushes = self.run_update(True, "--if-outdated")
+        self.assertEqual((result.returncode, pushes), (1, ""))
 
 
 GIB = 1 << 30

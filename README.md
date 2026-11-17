@@ -45,7 +45,8 @@ default already selected; typed answers come with the default filled in, Enter t
   `[setup] download_mbps`; it sizes Transmission's write cache and peer limits,
 - your nCore bookmark RSS URL,
 - a Transmission username and password. The same login is used by the web UI
-  (`http://<box>:9091/`), Transmission Remote GUI and rss2transmission.
+  (`http://<box>:9091/`), Transmission Remote GUI and rss2transmission. Later runs keep a
+  login that works without asking; `./setup.sh --change-login` asks for a new one.
 
 and then:
 - installs transmission-daemon, python3, curl, the chosen media server, and Samba (with
@@ -72,7 +73,10 @@ and then:
   you out), and sends a test push.
 
 Re-running is safe: existing config/secrets are kept, it only asks for missing values, and
-system files are only rewritten (and services only restarted) when something changes.
+system files are only rewritten (and services only restarted) when something changes. The
+summary at the end lists what the run really changed (files, packages, services, firewall
+rules, containers, app settings), or says that nothing did; `--dry-run` lists what a real
+run would change.
 `./setup.sh --help` lists the environment variables for a non-interactive install
 (`STORAGE_ROOT`, `STORAGE_UUID`, `STORAGE_DISK`, `MEDIA_SERVER`, `SAMBA`, `SAMBA_PASSWORD`,
 `AVAHI`, `TAILSCALE`, `TS_AUTHKEY`, `TAILSCALE_HTTPS`, `ARR`, `WHISPARR`, `STASHDB_KEY`, `NCORE_USER`,
@@ -471,7 +475,12 @@ LG and Samsung TVs (not in LG's store: the `.ipk` is sideloaded, e.g. with the w
 
 **Updates:** every Monday around 04:30 `torrent-box-arr-update.timer` pulls the apps' newest
 images and restarts the ones that got one, then pushes which (low priority), or that the
-update failed. A box that was off then catches up when it starts. `[setup] arr_auto_update =
+update failed. A box that was off then catches up when it starts. In between,
+`torrent-box-arr-update-check.timer` asks the apps every hour whether a new version is out
+(the *arr apps' "New update is available" health check, Seerr's status) and updates just
+those: their image often comes out a few hours after the release, so it tries again each hour
+until it's there, and pushes once one is running (its failures go only to `journalctl -u
+torrent-box-arr-update-check`; the weekly run pushes them). `[setup] arr_auto_update =
 no` (and a setup run) switches it off; then update by hand:
 `sudo docker compose -f ~/.local/share/torrent-box/arr/compose.yml pull` and the same with
 `up -d`. Right away: `sudo systemctl start torrent-box-arr-update`; what it did: `journalctl

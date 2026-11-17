@@ -1,18 +1,23 @@
 #!/usr/bin/env bash
 # torrent-box: update the Docker apps (Prowlarr, Sonarr, Radarr, Seerr, Whisparr) to their newest
 # images. Run weekly by torrent-box-arr-update.timer; pushes which apps were updated, or that it
-# failed.
+# failed. With --if-outdated (hourly, torrent-box-arr-update-check.timer) only the apps that
+# say a new version is out, and quietly: no push until one really got a new image (an app
+# knows of a release a few hours before its image is out), failures only in the journal.
 # Installed by setup.sh to /usr/local/lib/torrent-box/arr-update.
-# Usage: arr-update COMPOSE_FILE
+# Usage: arr-update COMPOSE_FILE [--if-outdated]
 set -uo pipefail
 compose_file=$1
+if_outdated=$([[ ${2:-} == --if-outdated ]] && echo 1)
 push=${TORRENT_BOX_PUSH:-/usr/local/lib/torrent-box/push}  # (tests use their own)
+apps_url=${TORRENT_BOX_APPS_URL:-http://127.0.0.1}
 
 compose() { docker compose -f "$compose_file" "$@"; }
 notify() { [[ ! -x $push ]] || "$push" "$@" || true; }
 fail() {
     echo "$1" >&2
-    notify "App update failed" "$1 (journalctl -u torrent-box-arr-update)" high warning
+    [[ -n $if_outdated ]] ||
+        notify "App update failed" "$1 (journalctl -u torrent-box-arr-update)" high warning
     exit 1
 }
 images() {  # NAME=IMAGE ID of each app's container (the container is named like the service)
@@ -22,10 +27,46 @@ images() {  # NAME=IMAGE ID of each app's container (the container is named like
     done
 }
 
+# The apps that say a newer version is out: the "New update is available" health check of
+# the *arr apps, Seerr's status.
+outdated() {
+    local name port api key
+    for name in $services; do
+        case $name in
+            seerr)
+                curl -fsS --max-time 10 "$apps_url:5055/api/v1/status" 2>/dev/null |
+                    grep -q '"updateAvailable": *true' && echo seerr
+                continue ;;
+            prowlarr) port=9696 api=v1 ;;
+            sonarr) port=8989 api=v3 ;;
+            radarr) port=7878 api=v3 ;;
+            whisparr) port=6969 api=v3 ;;
+            *) continue ;;
+        esac
+        key=$(sed -n 's:.*<ApiKey>\(.*\)</ApiKey>.*:\1:p' "$(dirname "$compose_file")/$name/config.xml" 2>/dev/null)
+        [[ -n $key ]] || continue
+        curl -fsS --max-time 10 -H "X-Api-Key: $key" "$apps_url:$port/api/$api/health" 2>/dev/null |
+            grep -q '"source": *"UpdateCheck"' && echo "$name"
+    done
+}
+
+# One update at a time (the weekly and the hourly one can meet)
+if exec 9>>"${TORRENT_BOX_LOCK:-/run/lock/torrent-box-arr-update}"; then flock 9; fi
+
 services=$(compose config --services) || fail "can't read $compose_file"
+if [[ -n $if_outdated ]]; then
+    services=$(outdated | paste -sd ' ')
+    [[ -n $services ]] || exit 0
+    echo "a new version is out: $services"
+fi
 before=$(images)
-compose pull --quiet || fail "couldn't download the new images"
-compose up -d --remove-orphans || fail "couldn't restart the apps on the new images"
+# shellcheck disable=SC2086  # $services: the names, split
+compose pull --quiet $services || fail "couldn't download the new images"
+if [[ -n $if_outdated ]]; then
+    compose up -d $services || fail "couldn't restart the apps on the new images"
+else
+    compose up -d --remove-orphans || fail "couldn't restart the apps on the new images"
+fi
 after=$(images)
 docker image prune -f >/dev/null || true  # the replaced images
 
@@ -33,6 +74,8 @@ updated=$(comm -13 <(sort <<<"$before") <(sort <<<"$after") | cut -d= -f1 | past
 if [[ -n $updated ]]; then
     echo "updated: $updated"
     notify "Apps updated" "New versions running: $updated" low arrow_up
+elif [[ -n $if_outdated ]]; then
+    echo "no new image yet: $services (checked again in an hour)"
 else
     echo "all up to date"
 fi

@@ -61,10 +61,11 @@ USER=${USER:-$(id -un)}
 
 DRY_RUN=0
 SHADOW=0
+CHANGE_LOGIN=0
 
 usage() {
     cat <<EOF
-Usage: ./setup.sh [--dry-run] [--shadow]
+Usage: ./setup.sh [--dry-run] [--shadow] [--change-login]
 
 Installs and configures transmission-daemon, rss2transmission, a media server (Jellyfin,
 minidlna or none), and optionally a Samba share of the storage disk and Tailscale for remote
@@ -74,6 +75,8 @@ Safe to re-run: existing config and secrets are kept, and it only asks for missi
 
   --dry-run   show what would be done; change nothing, never call sudo
   --shadow    also install systemd/shadow.conf (rss2transmission only does dry runs)
+  --change-login  ask for a new login shared by Transmission and the apps (otherwise a
+              working one is kept without asking)
   -h, --help  this help
 
 Answers can be given as environment variables instead of prompts:
@@ -159,14 +162,88 @@ quote() {
     printf '%s' "${out[*]}"
 }
 
+# What this run changed (or a dry run would): one line each, listed at the end. In a file, so
+# a step in a pipeline (a subshell) can add to it too.
+changed() { [[ -z ${TMP:-} ]] || printf '%s\n' "$*" >>"$TMP/changes"; }
+
+# A command run by run/as_root, in words for that list (the steps note what they do with
+# apt, ufw and docker compose themselves).
+note_cmd() {
+    local cmd=" $* " last=${*: -1}
+    case $cmd in
+        *" daemon-reload "*|" apt-get update "*|*" apt-get install "*) ;;
+        " systemctl "*)
+            case $cmd in
+                *" disable --now "*) changed "stopped and disabled: $last" ;;
+                *" enable --now "*) changed "enabled and started: $last" ;;
+                *" enable "*) changed "enabled: $last" ;;
+                *" disable "*) changed "disabled: $last" ;;
+                *" restart "*) changed "restarted: $last" ;;
+                *" start "*) changed "started: $last" ;;
+                *" stop "*) changed "stopped: $last" ;;
+                *) changed "command: $(quote "$@")" ;;
+            esac ;;
+        " mkdir "*|" install -d "*) changed "folder created: $last" ;;
+        " mount "*) changed "mounted: $last" ;;
+        " usermod -aG "*) changed "user $last added to the group $3" ;;
+        " tailscale serve "*) changed "tailscale serve: $(quote "${@:3}")" ;;
+        " ufw "*) changed "firewall: the rules ufw doesn't have yet (a dry run can't tell which)" ;;
+        " docker compose "*" up "*) changed "containers: the ones whose definition changed get recreated" ;;
+        *) changed "command: $(quote "$@")" ;;
+    esac
+}
+
+# What ufw and docker compose say they did (on stdin), for the list of changes.
+note_output() {
+    if [[ $1 == ufw ]]; then
+        local a args=()
+        for a in "${@:2}"; do [[ $a != comment ]] || break; args+=("$a"); done
+        if grep -q '^Rule.* added\|^Rules updated'; then changed "firewall: ufw $(quote "${args[@]}")"; fi
+        return 0
+    fi
+    # "Container NAME  STATE" lines: what happened to each (recreated, then started: recreated)
+    awk '$1 == "Container" && $3 ~ /^(Created|Recreated|Started|Stopped|Removed)$/ {
+             if (!($2 in st)) order[++k] = $2
+             if (!($2 in st) || $3 != "Started") st[$2] = tolower($3)
+         }
+         END { for (i = 1; i <= k; i++) print order[i] " " st[order[i]] }' |
+        while read -r name state; do changed "container $name: $state"; done
+}
+
 # Commands that change something: printed instead of run in a dry run.
 # None of them ever gets a secret on its command line.
 run() {
-    if (( DRY_RUN )); then info "would run: $(quote "$@")"; else "$@"; fi
+    if (( DRY_RUN )); then info "would run: $(quote "$@")"; else "$@" || return; fi
+    note_cmd "$@"
 }
 
 as_root() {
-    if (( DRY_RUN )); then info "would run: sudo $(quote "$@")"; else sudo "$@"; fi
+    if (( DRY_RUN )); then
+        info "would run: sudo $(quote "$@")"
+    elif [[ $1 == ufw || "$1 ${2:-}" == "docker compose" ]]; then  # they say what they changed
+        sudo "$@" 2>&1 | tee "$TMP/cmd.out" || return
+        note_output "$@" <"$TMP/cmd.out"
+        return 0
+    else
+        sudo "$@" || return
+    fi
+    note_cmd "$@"
+}
+
+# report PREFIX [LABEL]: a helper's report lines (on stdin), shown indented after PREFIX;
+# those that aren't about something already being so go on the list of changes too, after
+# LABEL (default PREFIX).
+report() {
+    local line
+    while IFS= read -r line; do
+        info "$1$line"
+        is_unchanged "$line" || changed "${2-$1}$line"
+    done
+}
+
+is_unchanged() {
+    local re=": (ok|off|missing|present)$|up to date|already|keeps |left as is|left on the CPU|not changing|not making|can't |^no |^warning: "
+    [[ $1 =~ $re ]]
 }
 
 helper() { PYTHONDONTWRITEBYTECODE=1 python3 "$REPO/setup_helper.py" "$@"; }
@@ -189,8 +266,10 @@ update_file() {
         else
             info "would create $dest (mode $mode)"
         fi
+        if [[ -f $dest ]]; then changed "file updated: $dest"; else changed "file created: $dest"; fi
         return 0
     fi
+    if [[ -f $dest ]]; then changed "file updated: $dest"; else changed "file created: $dest"; fi
     if [[ $owner == root ]]; then
         sudo install -D -m "$mode" "$src" "$dest"
     else
@@ -337,6 +416,7 @@ apt_install() {  # apt_install PKG...: install the ones that are missing
         return
     fi
     info "installing: ${missing[*]}"
+    changed "packages installed: ${missing[*]}"
     if (( ! APT_UPDATED )); then
         as_root apt-get update
         APT_UPDATED=1
@@ -427,10 +507,12 @@ setup_storage() {
         local line="UUID=$uuid $storage_root $fstype defaults,nofail 0 $pass"
         if (( DRY_RUN )); then
             info "would add to /etc/fstab: $line"
+            changed "/etc/fstab: $line"
         else
             [[ -e /etc/fstab.before-torrent-box ]] || sudo cp -p /etc/fstab /etc/fstab.before-torrent-box
             printf '%s\n' "$line" | sudo tee -a /etc/fstab >/dev/null
             info "added to /etc/fstab: $line"
+            changed "/etc/fstab: $line"
         fi
         as_root systemctl daemon-reload  # systemd generates mount units from fstab
     fi
@@ -515,6 +597,7 @@ format_blank_disk() {  # format_blank_disk /dev/sdX: one GPT partition over it a
     [[ -n $uuid ]] || die "no UUID on $part after formatting it"
     fresh_fs=1
     info "formatted $part (UUID $uuid)"
+    changed "disk formatted: $part (ext4, UUID $uuid)"
 }
 
 ### Media server choice
@@ -888,9 +971,12 @@ choose_login() {
     elif [[ -n $known_user && -n $known_pass ]]; then
         if check_login "$known_user" "$known_pass"; then
             rpc_user=$known_user rpc_password=$known_pass
-            if (( DRY_RUN )); then
-                info "the login in $from (user '$known_user') works with Transmission; would offer to keep it"
-            elif ! ask_yes "Keep the current Transmission login (user '$known_user', from $from)?"; then
+            if (( ! CHANGE_LOGIN )); then
+                info "Transmission login: user '$known_user' (works; to change it: ./setup.sh --change-login)"
+            elif (( DRY_RUN )); then
+                info "would ask for a new login (now user '$known_user', from $from)"
+            else
+                info "choose the new login; setup sets it in Transmission and the apps that share it"
                 ask_new_login "$known_user"
             fi
         else
@@ -1036,10 +1122,12 @@ setup_secrets() {
         info "secrets.ini is complete"
     elif (( DRY_RUN )); then
         info "would set in $SECRETS (mode 600): $(printf '%s\n' "${updates[@]}" | cut -d= -f1 | tr '\n' ' ')"
+        changed "secrets.ini: $(printf '%s\n' "${updates[@]}" | cut -d= -f1 | paste -sd ' ')"
     else
         mkdir -p -m 700 "$CONF_DIR"
         printf '%s\n' "${updates[@]}" | helper ini-set "$SECRETS" secrets
         info "saved: $(printf '%s\n' "${updates[@]}" | cut -d= -f1 | tr '\n' ' ')"
+        changed "secrets.ini: $(printf '%s\n' "${updates[@]}" | cut -d= -f1 | paste -sd ' ')"
     fi
     if [[ -f $SECRETS && $(stat -c %a "$SECRETS") != 600 ]]; then run chmod 600 "$SECRETS"; fi
 }
@@ -1058,6 +1146,7 @@ setup_config() {
             install -m 644 "$config_src" "$CONFIG"
             info "created from config.example.ini (storage_root = $storage_root)"
         fi
+        changed "file created: $CONFIG"
     fi
     # Remember the choices, so re-runs don't ask again.
     local key updates=()
@@ -1065,6 +1154,7 @@ setup_config() {
         [[ $key != tailscale_https || $tailscale == yes ]] || continue  # asked once Tailscale is on
         [[ $(ini "$CONFIG" setup "$key") == "${!key}" ]] || updates+=("$key=${!key}")
     done
+    if (( ${#updates[@]} )); then changed "config.ini [setup]: ${updates[*]}"; fi
     if (( ${#updates[@]} == 0 )); then
         :
     elif (( DRY_RUN )); then
@@ -1077,6 +1167,7 @@ setup_config() {
     local current
     current=$(ini "$CONFIG" ntfy server)
     if [[ ${current%/} != "$ntfy_server" ]]; then
+        changed "config.ini [ntfy]: server=$ntfy_server"
         if (( DRY_RUN )); then
             info "would set in [ntfy]: server=$ntfy_server"
         else
@@ -1205,6 +1296,7 @@ setup_transmission() {
         info "settings.json already has our settings"
     else
         info "updating settings.json: $(tr '\n' ' ' <<<"$changed")"
+        changed "Transmission settings: $(paste -sd ' ' <<<"$changed")"
         # Transmission writes its settings back when it stops, so stop first, then merge
         # into what it just saved.
         sudo systemctl stop transmission-daemon
@@ -1217,8 +1309,8 @@ setup_transmission() {
         fi
         rm -f "$TMP/settings.current.json" "$TMP/settings.new.json"  # contain the password
     fi
-    systemctl is-enabled -q transmission-daemon || sudo systemctl enable transmission-daemon
-    systemctl is-active -q transmission-daemon || sudo systemctl start transmission-daemon
+    systemctl is-enabled -q transmission-daemon || as_root systemctl enable transmission-daemon
+    systemctl is-active -q transmission-daemon || as_root systemctl start transmission-daemon
     wait_for_rpc
     info "Transmission is running and accepts the login (user '$rpc_user')"
 }
@@ -1292,7 +1384,7 @@ setup_jellyfin() {
     if (( DRY_RUN )); then
         info "would run Jellyfin's first-run wizard if it hasn't been (admin '$rpc_user', libraries from [routes])"
     elif ! JF_USER=$rpc_user JF_PASSWORD=$rpc_password helper jellyfin-setup "$config_src" |
-            sed 's/^/   /'; then
+            report "" "Jellyfin: "; then
         warn "Jellyfin's first-run setup failed; finish it at http://${lan_ip:-<this box>}:8096/"
     fi
     jellyfin_hwaccel
@@ -1323,7 +1415,7 @@ jellyfin_hwaccel() {
         return
     fi
     if ! JF_USER=$jf_user JF_PASSWORD=$jf_password helper jellyfin-hwaccel "$dev" \
-            <"$TMP/vainfo" | sed 's/^/   /'; then
+            <"$TMP/vainfo" | report "" "Jellyfin: "; then
         warn "transcoding: not switched on (above); Jellyfin: Dashboard -> Playback -> Transcoding -> VAAPI, $dev"
     fi
 }
@@ -1391,6 +1483,7 @@ setup_samba() {
                 "$SAMBA_SHARE" | sudo tee -a "$SMB_CONF" >/dev/null
             info "added to $SMB_CONF: include = $SAMBA_SHARE"
         fi
+        changed "$SMB_CONF: include = $SAMBA_SHARE"
         changed=1
     fi
     if (( ! DRY_RUN )); then
@@ -1412,6 +1505,7 @@ setup_samba() {
         fi
         printf '%s\n%s\n' "$password" "$password" | sudo smbpasswd -s -a "$USER" >/dev/null
         info "Samba user $USER added"
+        changed "Samba user added: $USER"
     fi
 
     systemctl is-enabled -q smbd 2>/dev/null || as_root systemctl enable smbd
@@ -1537,6 +1631,7 @@ setup_tailscale() {
             tailscale_status
             [[ $ts_state == Running ]] || die "Tailscale isn't connected after 'tailscale up' (state: ${ts_state:-unknown})"
             info "connected: $ts_name ($ts_ip)"
+            changed "joined the tailnet: $ts_name"
             info "tip: turn off key expiry for this box in the Tailscale admin console (Machines)" ;;
     esac
 }
@@ -1572,6 +1667,7 @@ setup_ntfy() {
     want=$(LC_ALL=C apt-cache policy ntfy 2>/dev/null | awk '/Candidate:/ { print $2 }')
     if [[ -n $have && -n $want && $want != "(none)" && $want != "$have" ]]; then
         info "ntfy $have -> $want (ntfy's own package, with the web app)"
+        changed "ntfy: $have -> $want"
         as_root env DEBIAN_FRONTEND=noninteractive apt-get install -y \
             -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold ntfy
         # The distro's ran as _ntfy, ntfy's own runs as ntfy: the message cache comes along.
@@ -1757,7 +1853,7 @@ setup_arr() {
             NCORE_PASSWORD=${ncore_password:-} NCORE_2FA=${ncore_code:-} \
             helper arr-connect --arr-dir "$ARR_DIR" --downloads-dir "$storage_root/downloads" \
             --misc-dir "$download_dir" --ntfy-server "$ntfy_server" --ntfy-topic "$ntfy_topic" \
-            "${roots[@]}" | sed 's/^/   /'; then
+            "${roots[@]}" | report ""; then
         die "could not connect the apps; see the error above"
     fi
     setup_seerr "$series_root" "$movie_root"
@@ -1799,7 +1895,7 @@ setup_seerr() {  # setup_seerr SERIES_ROOT MOVIE_ROOT
     fi
     if ! JF_USER=$jf_user JF_PASSWORD=$jf_password helper seerr-setup --arr-dir "$ARR_DIR" \
             --series-root "$1" --movie-root "$2" --app-url "http://$(hostname):5055" \
-            --ntfy-server "$ntfy_server" --ntfy-topic "$ntfy_topic" | sed 's/^/   seerr: /'; then
+            --ntfy-server "$ntfy_server" --ntfy-topic "$ntfy_topic" | report "seerr: "; then
         warn "Seerr's setup failed (see above); finish it at http://${lan_ip:-<this box>}:5055/"
     fi
 }
@@ -1807,29 +1903,33 @@ setup_seerr() {  # setup_seerr SERIES_ROOT MOVIE_ROOT
 # Weekly update of the apps to their newest images, pushing what changed. [setup]
 # arr_auto_update = no switches it off (then update by hand, see README).
 setup_arr_updates() {
-    local auto changed=0
+    local auto changed=0 unit timer
     auto=$(ini "$config_src" setup arr_auto_update)
     if [[ $arr != yes || ${auto,,} == no ]]; then
-        if systemctl is-enabled -q torrent-box-arr-update.timer 2>/dev/null; then
-            info "app updates: switched off ([setup] arr = no / arr_auto_update = no)"
-            as_root systemctl disable --now torrent-box-arr-update.timer
-        fi
+        for timer in torrent-box-arr-update.timer torrent-box-arr-update-check.timer; do
+            if systemctl is-enabled -q "$timer" 2>/dev/null; then
+                info "app updates: switched off ([setup] arr = no / arr_auto_update = no)"
+                as_root systemctl disable --now "$timer"
+            fi
+        done
         return
     fi
-    step "Weekly app updates"
+    step "App updates (weekly, and hourly for an app that says it has a new version)"
     if update_file "$REPO/templates/arr-update" "$LIB/arr-update" 755 root; then changed=1; fi
-    helper render --strip-comments "$REPO/systemd/torrent-box-arr-update.service" \
-        "COMPOSE=$ARR_DIR/compose.yml" >"$TMP/arr-update.service"
-    if update_file "$TMP/arr-update.service" /etc/systemd/system/torrent-box-arr-update.service 644 root; then
-        changed=1
-    fi
-    if update_file "$REPO/systemd/torrent-box-arr-update.timer" \
-            /etc/systemd/system/torrent-box-arr-update.timer 644 root; then
-        changed=1
-    fi
+    for unit in torrent-box-arr-update torrent-box-arr-update-check; do
+        helper render --strip-comments "$REPO/systemd/$unit.service" \
+            "COMPOSE=$ARR_DIR/compose.yml" >"$TMP/$unit.service"
+        if update_file "$TMP/$unit.service" "/etc/systemd/system/$unit.service" 644 root; then
+            changed=1
+        fi
+        if update_file "$REPO/systemd/$unit.timer" "/etc/systemd/system/$unit.timer" 644 root; then
+            changed=1
+        fi
+    done
     if (( changed )); then as_root systemctl daemon-reload; fi
-    systemctl is-enabled -q torrent-box-arr-update.timer 2>/dev/null ||
-        as_root systemctl enable --now torrent-box-arr-update.timer
+    for timer in torrent-box-arr-update.timer torrent-box-arr-update-check.timer; do
+        systemctl is-enabled -q "$timer" 2>/dev/null || as_root systemctl enable --now "$timer"
+    done
 }
 
 ### 11. rss2transmission
@@ -1908,12 +2008,14 @@ setup_desireerr() {
         warn "$DESIREERR_DIR has local changes; not updating it"
     elif (( DRY_RUN )); then
         info "would run: git -C $(quote "$DESIREERR_DIR") pull --ff-only"
+        changed "Desireerr: updated, if it has a new version"
     else
         before=$(git -C "$DESIREERR_DIR" rev-parse HEAD)
         if ! git -C "$DESIREERR_DIR" pull -q --ff-only; then
             warn "couldn't update $DESIREERR_DIR; keeping the version it has"
         elif [[ $(git -C "$DESIREERR_DIR" rev-parse HEAD) != "$before" ]]; then
             info "updated to $(git -C "$DESIREERR_DIR" log -1 --format='%h %s')"
+            changed "Desireerr updated to $(git -C "$DESIREERR_DIR" log -1 --format='%h %s')"
             changed=1
         else
             info "up to date: $DESIREERR_DIR"
@@ -1959,7 +2061,7 @@ setup_desireerr() {
                 DESIREERR_STASHDB_KEY=$stashdb_key DESIREERR_JELLYFIN_KEY=$jf_key \
                 DESIREERR_NTFY_SERVER=${ntfy_server:-} DESIREERR_NTFY_TOPIC=${ntfy_topic:-} \
                 PYTHONDONTWRITEBYTECODE=1 python3 "$DESIREERR_DIR/desireerr.py" init --data "$DESIREERR_DATA"); then
-            while IFS= read -r line; do info "$line"; done <<<"$out"
+            report "" "Desireerr: " <<<"$out"
         else
             warn "couldn't set its admin and StashDB key (see above); its first visit asks instead"
         fi
@@ -1999,7 +2101,7 @@ setup_xxx_library() {
         return
     fi
     while IFS= read -r line; do
-        if [[ $line == warning:* ]]; then warn "${line#warning: }"; else info "$line"; fi
+        if [[ $line == warning:* ]]; then warn "${line#warning: }"; else report "" "Jellyfin: " <<<"$line"; fi
     done <<<"$out"
 }
 
@@ -2047,7 +2149,9 @@ ALL_WEB_PORTS="$DASHBOARD_PORT 9091 8096 8200 $NTFY_PORT 5055 8989 7878 9696 696
 https_port() { if (( $1 == DASHBOARD_PORT )); then echo 443; else echo $(( $1 + TS_HTTPS_OFFSET )); fi; }
 
 ts_serve() {  # `tailscale serve ARGS`, without its explanations
-    if (( DRY_RUN )); then as_root tailscale serve "$@"; else sudo tailscale serve "$@" >/dev/null; fi
+    if (( DRY_RUN )); then as_root tailscale serve "$@"; return; fi
+    sudo tailscale serve "$@" >/dev/null || return
+    note_cmd tailscale serve "$@"
 }
 
 # `tailscale serve` proxies each one's HTTPS port on the tailnet to it (the app itself has its
@@ -2287,7 +2391,8 @@ finish() {
     [[ -z ${disk_dev:-} ]] ||
         info "Disk health:            smartd watches $disk_dev; problems come as urgent pushes"
     if [[ $arr == yes && $(ini "$config_src" setup arr_auto_update) != no ]]; then
-        info "App updates:            weekly (Monday ~04:30), pushed when an app got a new version"
+        info "App updates:            weekly (Monday ~04:30), and within the hour when an app says a new"
+        info "                        version is out; pushed when an app got a new version"
     fi
     if [[ $tailscale == yes ]]; then
         tailscale_status
@@ -2312,10 +2417,26 @@ finish() {
         info "                        topic '$ntfy_topic' (reaches the phone at home only)"
     fi
     info "logs: journalctl --user -u rss2transmission"
+    show_changes
     if (( DRY_RUN )); then
         printf '\nDry run: nothing was changed.\n'
     else
         printf '\nDone.\n'
+    fi
+}
+
+# The list changed() kept, each line once.
+show_changes() {
+    if (( DRY_RUN )); then
+        step "What a real run would change"
+        info "(as far as a dry run can tell: it can't read root-only files or ufw's rules)"
+    else
+        step "What this run changed"
+    fi
+    if [[ -s ${TMP:-}/changes ]]; then
+        awk '!seen[$0]++ { print "   " $0 }' "$TMP/changes"
+    else
+        info "nothing: everything was already set up like this"
     fi
 }
 
@@ -2327,6 +2448,7 @@ main() {
         case $arg in
             --dry-run) DRY_RUN=1 ;;
             --shadow) SHADOW=1 ;;
+            --change-login) CHANGE_LOGIN=1 ;;
             -h|--help) usage; exit 0 ;;
             *) usage >&2; exit 2 ;;
         esac

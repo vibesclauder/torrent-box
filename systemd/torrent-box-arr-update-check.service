@@ -1,0 +1,13 @@
+# Updates the Docker apps that say a new version is out (arr-update --if-outdated); started
+# by torrent-box-arr-update-check.timer. setup.sh fills in @COMPOSE@ and installs it.
+[Unit]
+Description=torrent-box: update the Docker apps that have a new version
+Documentation=https://github.com/vibesclauder/torrent-box
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/torrent-box/arr-update @COMPOSE@ --if-outdated
+TimeoutStartSec=1h
