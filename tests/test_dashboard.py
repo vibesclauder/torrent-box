@@ -300,13 +300,73 @@ class DiskHealthTest(unittest.TestCase):
                       mock.patch.object(db, "service_check", RUNNING)):
             patch.start()
             self.addCleanup(patch.stop)
-        self.log = self.dir / "attrlog.ST12000VN0008-3MH101-WZ00E5CG.ata.csv"
+        self.log = self.dir / "attrlog.ST12000VN0008_3MH101-ZA0B1C2D.ata.csv"
+        # no drive database, no disks: the model as smartd's log name has it
+        for patch in (mock.patch.object(db, "DRIVEDBS", []),
+                      mock.patch.object(db, "SYS_BLOCK", self.dir / "block"),
+                      mock.patch.object(db, "UDEV_DATA", self.dir / "udev")):
+            patch.start()
+            self.addCleanup(patch.stop)
+        db.drive_families.cache_clear()
+        self.addCleanup(db.drive_families.cache_clear)
 
     def test_healthy(self):
         self.log.write_text(self.LOG.replace("15:00", "14:30") + self.LOG)
         c = db.check_disk({})
         self.assertEqual((c["state"], c["summary"]),
-                         (db.OK, "ST12000VN0008-3MH101 35 °C, no bad sectors"))
+                         (db.OK, "ST12000VN0008_3MH101, 35 °C, no bad sectors"))
+
+    def test_name_from_drive_database(self):
+        drivedb = self.dir / "drivedb.h"
+        drivedb.write_text('''/* drivedb.h */
+  { "VERSION: 7.5", "-", "", "", "" },
+  { "Seagate IronWolf", // tested with ST12000VN0008-2JH101/SC60, see https://x/
+    "ST([123468]|1[0246])000VN00(0?[0234678]|1|22|33|41)-.*",
+    "", "",
+    "-v 18,raw48,Head_Health "
+  },
+  { "Western Digital Red (CMR)", "WDC WD[1-8]0EFR" "X-.*", "", "", "" },
+  { "USB: Seagate; ", "0x0bc2:.*", "", "", "" },
+''')
+        block, udev = self.dir / "block", self.dir / "udev"
+        for dev, n, serial in (("nvme0n1", "259:0", "1234567890123456"), ("sda", "8:0", "ZA0B1C2D")):
+            (block / dev).mkdir(parents=True)
+            (block / dev / "dev").write_text(n + "\n")
+            (block / dev / "size").write_text("23437770752\n")
+            udev.mkdir(exist_ok=True)
+            (udev / f"b{n}").write_text(f"S:disk/by-id/x\nE:ID_MODEL=ST12000VN0008-3M\n"
+                                        f"E:ID_SERIAL=ST12000VN0008-3MH101_{serial}\n"
+                                        f"E:ID_SERIAL_SHORT={serial}\n")
+        (block / "sda1").mkdir()  # a partition: the disk's serial too, but not the disk
+        (block / "sda1" / "partition").write_text("1\n")
+        (block / "sda1" / "dev").write_text("8:1\n")
+        (block / "sda1" / "size").write_text("2048\n")
+        (udev / "b8:1").write_text("E:ID_SERIAL=ST12000VN0008-3MH101_ZA0B1C2D\n"
+                                   "E:ID_SERIAL_SHORT=ZA0B1C2D\n")
+        with mock.patch.object(db, "DRIVEDBS", [self.dir / "missing.h", drivedb]):
+            db.drive_families.cache_clear()
+            self.assertEqual(db.find_disk("ST12000VN0008_3MH101", "ZA0B1C2D"),
+                             ("Seagate IronWolf 12 TB", "sda"))
+            self.assertEqual(db.drive_family("WDC WD40EFRX-68N32N0"), "Western Digital Red (CMR)")
+            self.assertIsNone(db.drive_family("0x0bc2:0x2101"))  # USB bridges aren't drives
+            self.assertEqual(db.find_disk("Unknown_Disk", "X1"), ("Unknown_Disk", None))
+
+    def test_reads_and_writes(self):
+        (self.dir / "block" / "sdz").mkdir(parents=True)
+        stat = self.dir / "block" / "sdz" / "stat"
+
+        def look(now, read, written, busy):
+            stat.write_text(f"  5035930 268797 {read} 157383274 708330 213036 {written} "
+                            f"70306884 0 {busy} 229276647 0 0 0 0 22761 1586487\n")
+            return db.disk_io("sdz", now)
+        with mock.patch.object(db, "SYS_BLOCK", self.dir / "block"), \
+                mock.patch.dict(db.DISK_IO, clear=True):
+            self.assertEqual(look(1000, 0, 0, 0)["read"], None)  # nothing to compare with yet
+            io = look(1010, 20480 * 10, 2048 * 10, 2500)  # 10 s: 10 MB/s, 1 MB/s, 2.5 s busy
+            self.assertEqual((io["read"], io["write"], io["busy"]), (10 << 20, 1 << 20, 25))
+            io = look(1060, 20480 * 60, 2048 * 10, 2500)  # the first minute: 600 MB in 60 s
+            self.assertEqual(io["history"], [(1060, 10 << 20, (2048 * 10 * 512) / 60, 2500 / 600)])
+            self.assertIsNone(look(1070, 0, 0, 0)["read"])  # counters went back: a reboot?
 
     def test_bad_sectors_and_heat(self):
         self.log.write_text(self.LOG.replace("\t5;100;0;", "\t5;99;8;").replace("35 (", "57 ("))
@@ -705,6 +765,86 @@ class ResearchTest(unittest.TestCase):
                 self.assertIn(text, " ".join(db.check_ncore(self.arr_dir, login, now)["details"]))
 
 
+class SystemTest(unittest.TestCase):
+    def test_cpu_between_looks_and_the_hourly_history(self):
+        d = db.Deltas()
+        self.assertIsNone(d.update(0, (100, 1000), 30))  # nothing to compare with yet
+        self.assertEqual(d.update(5, (150, 1100), 30), (5, [50, 100]))
+        self.assertEqual(db.cpu_percent([50, 100]), 50)
+        self.assertIsNone(db.cpu_percent([0, 0]))  # /proc/stat didn't move
+        d.update(30, (160, 1200), 31)  # too soon for a sample
+        d.update(60, (225, 1500), 32)  # the minute: 125 of 500
+        self.assertEqual(d.series(), [(60, 60, [125, 500], 32)])
+        for minute in range(2, 70):
+            d.update(minute * 60, (225 + minute, 1500 + minute * 100))
+        self.assertEqual(len(d.series()), db.Deltas.KEEP)  # an hour
+
+    def test_memory_adds_up(self):
+        meminfo = "MemTotal:  8000000 kB\nMemFree:  1000000 kB\nMemAvailable:  5000000 kB\n"
+        with mock.patch.object(db.Path, "read_text", lambda self: meminfo):
+            mem = db.memory_info()
+        self.assertEqual((mem["used"], mem["cache"], mem["free"]),
+                         (3000000 * 1024, 4000000 * 1024, 1000000 * 1024))
+        self.assertEqual(mem["used"] + mem["cache"] + mem["free"], mem["total"])
+
+    def test_check(self):
+        c = db.check_system({})
+        self.assertEqual(c["state"], db.OK)
+        self.assertIn("CPUs", c["summary"])
+        self.assertTrue({"cpus", "load", "memory", "disk", "history"} <= c["metrics"].keys())
+
+    def test_meters(self):
+        gb = 1 << 30
+        metrics = {"cpus": 4, "uptime": 90000, "load": 0.5, "cpu": 12.4, "temp": 41.2,
+                   "memory": {"total": 8 * gb, "used": 2 * gb, "cache": 5 * gb, "free": gb},
+                   "disk": {"used": 20 * gb, "free": 80 * gb, "percent": 20},
+                   "history": [(3600 - 120, 3.0, 25.0), (3600 - 60, 40.0, 26.0)]}
+        page = db.system_html(db.result(db.OK, "up 1 day 1 h", metrics=metrics), 3600)
+        # closed: the summary; open: the meters
+        self.assertTrue(page.startswith('<details class="more" data-fold="more-system">'
+                                        '<summary>up 1 day 1 h<span class="chev">'))
+        for text in ("<b>12%</b>", "load 0.50 · 4 CPUs", "peak 40%", "<b>25%</b>",
+                     "2.0 / 8.0 GB · cache 5.0 GB", 'class="cache" style="width:62.5%"',
+                     "<b>20%</b>", "80.0 GB free of 100 GB"):
+            with self.subTest(text=text):
+                self.assertNotIn(text, page[:page.index("</summary>")])
+                self.assertIn(text, page)
+        self.assertEqual(page.count("<svg"), 2)  # CPU and memory, the last hour
+        page = db.system_html(db.result(db.OK, "x", metrics={**metrics, "history": []}), 3600)
+        self.assertNotIn("<svg", page)
+        self.assertIn("the last hour shows up here", page)
+        self.assertEqual(db.system_html(db.result(db.OK, "up 1 h"), 0), "up 1 h")  # no metrics
+
+    def test_size_of(self):
+        gb = 1 << 30
+        self.assertEqual(db.size_of(4.3 * gb, 12.9 * gb), "4.3 / 12.9 GB")
+        self.assertEqual(db.size_of(512 << 20, 2 * gb), "512 MB / 2.0 GB")
+        self.assertEqual(db.short_size(1011.6 * (1 << 20)), "1.0 GB")  # not 1011.6 MB
+        self.assertEqual(db.short_size(863.2 * gb), "863 GB")
+        self.assertEqual(db.short_size(12 * gb * 1024), "12.0 TB")
+
+    def test_disk_io(self):
+        mb = 1 << 20
+        disk = {"name": "IronWolf", "read": 85 * mb, "write": 0.0, "busy": 34.2,
+                "history": [(3480, 2 * mb, 0, 3), (3540, 180 * mb, 12 * mb, 80)]}
+        page = db.disk_io_html(db.result(db.OK, "IronWolf 12 TB", io=[disk]), 3600)
+        self.assertIn('<summary>IronWolf 12 TB · busy 34%<span class="chev">', page)
+        for text in ("<b>85 MB/s</b>", "peak 180 MB/s", "<b>0 B/s</b>", "peak 12 MB/s"):
+            with self.subTest(text=text):
+                self.assertIn(text, page)
+        self.assertEqual(page.count("<svg"), 2)
+        idle = db.disk_io_html(db.result(db.OK, "x", io=[{**disk, "busy": 0.1}]), 3600)
+        self.assertIn("<summary>x · idle<", idle)
+        first = db.disk_io_html(db.result(db.OK, "x", io=[
+            {**disk, "read": None, "write": None, "busy": None, "history": []},
+            {**disk, "name": "Red"}]), 3600)
+        self.assertIn("<summary>x<", first)  # two disks: each line says which
+        self.assertIn('<div class="muted">IronWolf</div>', first)  # measuring
+        self.assertIn('<div class="muted">Red · busy 34%</div>', first)
+        self.assertIn("<b>–</b>", first)
+        self.assertEqual(db.disk_io_html(db.result(db.OK, "a & b"), 0), "a &amp; b")  # no I/O
+
+
 class PageTest(unittest.TestCase):
     STATUS = {"time": 0, "hostname": "box", "storage_root": "/mnt/storage", "checks": {
         "storage": db.result(db.OK, "9 TB free", percent=10),
@@ -814,14 +954,14 @@ class PageTest(unittest.TestCase):
         self.assertIn(">v12.4.0</div>", page)                            # the dot says it's fine
         self.assertIn('title="0 downloading, 54 seeding · version 4.1.1 (56442e2929)">idle</div>', page)
         self.assertIn('title="healthy · version 3.0.2.5780">v3.0.2</div>', page)
-        folded = page[page.index('<details class="folded">'):]
+        folded = page[page.index('<details class="folded" data-fold="folded">'):]
         self.assertIn("all 2 fine", folded)
         self.assertLess(page.index("Prowlarr"), page.index("<h2>Health</h2>"))
-        self.assertNotIn("<h3>Monitor", page[:page.index('<details class="folded">')])
+        self.assertNotIn("<h3>Monitor", page[:page.index('<details class="folded" data-fold="folded">')])
         # a problem in the folded group shows on its closed line
         checks["prowlarr"] = db.result(db.WARN, "1 issue", ["Indexer nCore is unavailable"], version="3.0.2")
         page = db.render({**self.STATUS, "checks": checks}, "box")
-        summary = page[page.index('<details class="folded">'):page.index("</summary>")]
+        summary = page[page.index('<details class="folded" data-fold="folded">'):page.index("</summary>")]
         self.assertIn("<b>Prowlarr</b>: 1 issue", summary)
         self.assertNotIn("all 2 fine", summary)
         self.assertIn('<i class="dot warn">', summary)

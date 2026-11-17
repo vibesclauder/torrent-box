@@ -101,7 +101,10 @@ has a problem; opened, it stays open on that browser). Each app has its own logo
 the app itself, so nothing is copied into this repo), a dot for whether it's healthy, and
 its version (Transmission: its speeds, or idle), or what's wrong. Below
 the apps: the storage disk (free space), the nCore feed (rss2transmission's last run), the
-Samba share, Tailscale and the box itself (uptime, load, memory, CPU temperature). Anything
+Samba share, Tailscale and the box itself: uptime and CPU temperature, and meters for CPU
+use (with the load), memory (apps, and the cache the kernel gives back when they need it)
+and the OS disk; CPU and memory with a line of their last hour (the meters
+open from the row's line, and stay open on that browser once opened). Anything
 that needs a look is listed at the top, and the tab's icon turns orange or red. It refreshes itself every 20 s (not while you type in it);
 `http://<box>/status.json` has the same data for scripts.
 
@@ -204,7 +207,10 @@ daily while it lasts: time to copy off what you can't download again. Details:
 Our line is a marked block in `/etc/smartd.conf` (the original is kept as
 `smartd.conf.before-torrent-box`), before its `DEVICESCAN`, which keeps watching any other
 disks. The pushes go through `/usr/local/lib/torrent-box/push` (root-only, it holds the ntfy
-topic). The start page shows the disk's temperature and whether it has bad sectors.
+topic). The start page shows the disk by name (its family from smartmontools' drive
+database and its size, e.g. "Seagate IronWolf 12 TB", or the bare model number if the
+database doesn't know it), its temperature, whether it has bad sectors, and how busy it
+is: its reads and writes now, and a line of each for the last hour.
 
 ## Samba share
 

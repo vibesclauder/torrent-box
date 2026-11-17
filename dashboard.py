@@ -17,8 +17,10 @@ Standard library only; one round of checks serves every request for a few second
 import argparse
 import base64
 import calendar
+import collections
 import configparser
 import errno
+import functools
 import html
 import http.client
 import json
@@ -797,6 +799,99 @@ def read_attrlog(path):
     return attrs
 
 
+DRIVEDBS = [Path("/var/lib/smartmontools/drivedb/drivedb.h"),  # update-smart-drivedb's
+            Path("/usr/share/smartmontools/drivedb.h")]
+SYS_BLOCK, UDEV_DATA = Path("/sys/class/block"), Path("/run/udev/data")
+DRIVEDB_TOKEN = re.compile(r'"((?:[^"\\]|\\.)*)"|//[^\n]*|/\*.*?\*/|([{},])', re.S)
+
+
+@functools.lru_cache(maxsize=None)
+def drive_families():
+    """(family, model regex) pairs from smartmontools' drive database."""
+    for path in DRIVEDBS:
+        try:
+            text = path.read_text(errors="replace")
+        except OSError:
+            continue
+        entries, fields, depth = [], [], 0
+        for m in DRIVEDB_TOKEN.finditer(text):
+            string, punct = m.group(1), m.group(2)
+            if punct == "{":
+                depth, fields, field = depth + 1, [], ""
+            elif punct == "}":
+                if depth == 1 and len(fields) >= 1:
+                    entries.append(fields + [field])
+                depth -= 1
+            elif punct == "," and depth == 1:
+                fields.append(field)
+                field = ""
+            elif string is not None and depth == 1:
+                field += string  # "a" "b" is one string in C
+        families = []
+        for family, regex, *_ in entries:
+            if not family or family.startswith(("$", "USB:", "VERSION:", "DEFAULT")):
+                continue
+            try:
+                families.append((family, re.compile(regex)))
+            except re.error:
+                continue
+        if families:
+            return families
+    return []
+
+
+def drive_family(model):
+    """'ST12000VN0008-3MH101' -> 'Seagate IronWolf', or None if the database doesn't know."""
+    return next((family for family, regex in drive_families() if regex.fullmatch(model)), None)
+
+
+def find_disk(model, serial):
+    """(name, device) of a disk: its family and size ("Seagate IronWolf 12 TB"), or its
+    model if unknown; the device ("sda") or None. smartd's log names have the model with
+    anything but letters and digits as "_"; udev's ID_SERIAL has it with only spaces as "_"
+    (sysfs cuts it at 16 characters). Not /dev/disk/by-id: the service has no /dev."""
+    size = dev = None
+    for block in SYS_BLOCK.glob("*"):
+        if (block / "partition").exists():  # same serial as its disk
+            continue
+        try:
+            udev = dict(re.findall(r"^E:(\w+)=(.*)$",
+                                   (UDEV_DATA / f"b{(block / 'dev').read_text().strip()}")
+                                   .read_text(), re.M))
+            if udev.get("ID_SERIAL_SHORT") != serial or "ID_SERIAL" not in udev:
+                continue
+            model, dev = udev["ID_SERIAL"][:-len(serial) - 1].replace("_", " "), block.name
+            size = int((block / "size").read_text()) * 512
+        except (OSError, ValueError):
+            continue
+        break
+    family = drive_family(model)
+    if not family:
+        return model, dev
+    if size:
+        family += f" {size / 1e12:.0f} TB" if size >= 1e12 else f" {size / 1e9:.0f} GB"
+    return family, dev
+
+
+DISK_IO = {}  # device -> Deltas of its sectors read, written and time busy
+
+
+def disk_io(dev, now):
+    """{read, write (bytes/s), busy (%), history [(time, read, write, busy)]} of a disk from
+    its counters in sysfs; read, write and busy are None until the second look."""
+    fields = [int(v) for v in (SYS_BLOCK / dev / "stat").read_text().split()]
+    counters = (fields[2], fields[6], fields[9])  # sectors (512 bytes) read, written; ms busy
+
+    def rates(seconds, changes):
+        read, written, busy = changes
+        return read * 512 / seconds, written * 512 / seconds, min(100, busy / 10 / seconds)
+    deltas = DISK_IO.setdefault(dev, Deltas())
+    moved = deltas.update(now, counters)
+    read, write, busy = rates(*moved) if moved else (None, None, None)
+    return {"read": read, "write": write, "busy": busy,
+            "history": [(t, *rates(seconds, changes)) for t, seconds, changes, _ in deltas.series()]}
+
+
 def check_disk(s, now=None):
     now = now or time.time()
     state, summary = service_check("smartmontools")
@@ -809,18 +904,24 @@ def check_disk(s, now=None):
         logs = []
     if not logs:
         return result(OK, "smartd is watching (no readings yet)")
-    parts, details, state = [], [], OK
+    parts, details, state, io = [], [], OK, []
     for log in logs:
-        model = log.name[len("attrlog."):-len(".ata.csv")].rsplit("-", 1)[0]  # minus serial
+        model, serial = log.name[len("attrlog."):-len(".ata.csv")].rsplit("-", 1)
+        model, dev = find_disk(model, serial)
         try:
             attrs = read_attrlog(log)
         except OSError:
             continue
+        if dev:
+            try:
+                io.append({"name": model, **disk_io(dev, now)})
+            except (OSError, ValueError, IndexError):
+                pass
         temp = attrs.get(194, attrs.get(190))
         part = model
         if temp is not None:
             temp &= 0xFF  # some disks pack min/max into the raw value
-            part += f" {temp} °C"
+            part += f", {temp} °C"
             if temp >= DISK_HOT:
                 state = WARN
                 details.append(f"{model} is hot ({temp} °C)")
@@ -832,7 +933,7 @@ def check_disk(s, now=None):
         else:
             part += ", no bad sectors"
         parts.append(part)
-    return result(state, "; ".join(parts) or "smartd is watching", details)
+    return result(state, "; ".join(parts) or "smartd is watching", details, io=io)
 
 
 def cpu_temperature():
@@ -846,26 +947,94 @@ def cpu_temperature():
     return None
 
 
-def check_system(s):
-    parts, state = [], OK
+def cpu_times():
+    """(busy, total) jiffies of all CPUs together, from /proc/stat."""
+    fields = [int(v) for v in Path("/proc/stat").read_text().split("\n", 1)[0].split()[1:]]
+    idle = fields[3] + (fields[4] if len(fields) > 4 else 0)  # idle + iowait
+    total = sum(fields[:8])  # guest time is in user time already
+    return total - idle, total
+
+
+class Deltas:
+    """How counters (CPU time, a disk's sectors...) moved since the last look, and in each
+    minute of the last hour for the sparklines (the watcher looks every WATCH_EVERY, page or
+    not)."""
+    SAMPLE_EVERY, KEEP = 60, 60
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.last = self.sampled = None  # (time, counters)
+        self.history = collections.deque(maxlen=self.KEEP)  # (time, seconds, changes, extra)
+
+    def update(self, now, counters, extra=None):
+        """(seconds, changes) since the last look, or None the first time (or when a counter
+        went back). Once a minute it also keeps the minute's, with extra, in the history."""
+        with self.lock:
+            last, self.last = self.last, (now, counters)
+            if not self.sampled or now - self.sampled[0] >= self.SAMPLE_EVERY - 5:
+                minute = self.change(self.sampled, now, counters)
+                if minute:
+                    self.history.append((now, *minute, extra))
+                self.sampled = (now, counters)
+            return self.change(last, now, counters)
+
+    @staticmethod
+    def change(since, now, counters):
+        if not since or now <= since[0]:
+            return None
+        changes = [new - old for new, old in zip(counters, since[1])]
+        return None if any(c < 0 for c in changes) else (now - since[0], changes)
+
+    def series(self):
+        with self.lock:
+            return list(self.history)
+
+
+CPU = Deltas()  # of (busy, total) CPU time; with memory % as the extra
+
+
+def cpu_percent(changes):
+    busy, total = changes
+    return busy * 100 / total if total > 0 else None
+
+
+def memory_info():
+    """{total, used, cache, free} in bytes, from /proc/meminfo.
+    used + cache + free = total; cache is what the kernel gives back when apps need it."""
+    mem = {k: int(v) * 1024 for k, v in
+           re.findall(r"^(\w+):\s+(\d+)", Path("/proc/meminfo").read_text(), re.M)}
+    total, available, free = mem["MemTotal"], mem["MemAvailable"], mem["MemFree"]
+    return {"total": total, "used": total - available, "cache": max(0, available - free),
+            "free": free}
+
+
+def check_system(s, now=None):
+    now = now or time.time()
+    parts, state, metrics = [], OK, {"cpus": os.cpu_count()}
     try:
         uptime = float(Path("/proc/uptime").read_text().split()[0])
         load = Path("/proc/loadavg").read_text().split()[0]
-        mem = dict(re.findall(r"^(\w+):\s+(\d+)", Path("/proc/meminfo").read_text(), re.M))
-        total, available = int(mem["MemTotal"]) * 1024, int(mem["MemAvailable"]) * 1024
+        mem = memory_info()
         parts += [f"up {duration(uptime)}", f"load {load} ({os.cpu_count()} CPUs)",
-                  f"memory {human_size(total - available)} of {human_size(total)}"]
-    except (OSError, ValueError, KeyError, IndexError):
+                  f"memory {human_size(mem['used'])} of {human_size(mem['total'])}"]
+        metrics.update(uptime=uptime, load=float(load), memory=mem)
+        moved = CPU.update(now, cpu_times(), mem["used"] * 100 / mem["total"])
+        metrics["cpu"] = cpu_percent(moved[1]) if moved else None
+    except (OSError, ValueError, KeyError, IndexError, ZeroDivisionError):
         pass
+    metrics["history"] = [(t, cpu, mem) for t, _, changes, mem in CPU.series()
+                          if (cpu := cpu_percent(changes)) is not None]
     temp = cpu_temperature()
     if temp is not None:
         parts.append(f"CPU {temp:.0f} °C")
+        metrics["temp"] = temp
     details = []
     used, free, percent = disk_usage("/")
+    metrics["disk"] = {"used": used, "free": free, "percent": percent}
     if percent >= 90:
         state = WARN
         details.append(f"system disk {percent}% full ({human_size(free)} free)")
-    return result(state, ", ".join(parts) or "?", details)
+    return result(state, ", ".join(parts) or "?", details, metrics=metrics)
 
 
 def gather(s, arr_dir, pool, last_login=None):
@@ -1322,6 +1491,27 @@ background:var(--soft);color:var(--accent)}
 .bar{height:8px;background:var(--soft);border-radius:4px;overflow:hidden;margin-top:6px;max-width:440px}
 .bar i{display:block;height:100%%;background:linear-gradient(90deg,var(--b1),var(--b2))}
 .bar.warn i{background:var(--warn)}
+.more>summary{margin:0;list-style:none}
+.more>summary::-webkit-details-marker{display:none}
+.more>summary .chev{display:inline-block;margin-left:8px;vertical-align:-1px}
+.more[open]>summary .chev{transform:rotate(90deg)}
+.meters{display:grid;grid-template-columns:62px minmax(0,440px) 132px;gap:12px 14px;margin-top:10px}
+.meter{grid-column:1/-1;display:grid;grid-template-columns:subgrid;row-gap:3px;align-items:center;
+grid-template-areas:"k bar sp" "k val sp"}
+.meter.nobar{grid-template-areas:"k val sp"}
+.meter>span{grid-area:k;font-size:13px;color:var(--muted)}
+.meter .bar{grid-area:bar;margin:0;max-width:none;height:10px;display:flex}
+.meter .bar i{flex:none}
+.meter .bar i.cache{background:color-mix(in srgb,var(--b2) 28%%,transparent)}
+.meter .val{grid-area:val;display:flex;align-items:baseline;gap:8px;min-width:0;font-size:13px}
+.meter .val b{white-space:nowrap}
+.meter .val small{margin-left:auto;min-width:0;color:var(--muted);font-size:12px;white-space:nowrap;
+overflow:hidden;text-overflow:ellipsis}
+.meter .sp{grid-area:sp}
+.spark{display:block;width:132px;height:30px;color:var(--b2);background:var(--soft);border-radius:4px}
+.spark.warn{color:var(--warn)}
+.sp small{display:block;font-size:11px;color:var(--muted);text-align:right}
+.sp .none{font-size:11px;color:var(--muted);text-align:right}
 ul.details{margin:4px 0 0;padding-left:18px;color:var(--muted);font-size:13px}
 a.tile:hover{position:relative;z-index:2}
 .flags{display:flex;align-items:center;gap:6px;margin-left:auto}
@@ -1354,8 +1544,9 @@ form.code button:disabled{opacity:.6}
 summary{cursor:pointer;margin-top:6px}
 footer{margin-top:30px;color:var(--muted);font-size:12px;display:flex;justify-content:space-between;
 flex-wrap:wrap;gap:6px}
-@media (max-width:600px){.row{grid-template-columns:1fr}.row>div:last-child{padding-top:0}
+@media (max-width:600px){.meters{grid-template-columns:minmax(0,1fr);gap:12px}.meter{grid-template-columns:56px minmax(0,1fr) 96px;column-gap:10px;grid-template-areas:"k val val" "bar bar sp";align-items:center}.meter>span{align-self:baseline}.meter.nobar{grid-template-areas:"k val sp"}.spark{width:96px;height:24px}.sp small{display:none}.row{grid-template-columns:1fr}.row>div:last-child{padding-top:0}
 .word{font-size:22px}}
+@media (max-width:380px){.meter{grid-template-columns:52px minmax(0,1fr) 80px;column-gap:8px}.spark{width:80px}}
 .many .tile{flex-direction:column;gap:10px;padding:14px}
 @media (max-width:860px){.tile{flex-direction:column;gap:10px;padding:14px}.tile b{font-size:16px}}
 @media (max-width:640px){
@@ -1387,15 +1578,17 @@ function useReachable(){
 
 SCRIPT = PROBE_SCRIPT + """
 useReachable();
-function unfold(){  // the folded group stays open on this browser once opened
-  let open=false;
-  try{open=localStorage.getItem("torrent-box.folded")==="open";}catch(e){}
-  for(const d of document.querySelectorAll("details.folded"))d.open=open;
+function unfold(){  // the folded group and the meters stay open on this browser once opened
+  for(const d of document.querySelectorAll("details[data-fold]")){
+    let open=false;
+    try{open=localStorage.getItem("torrent-box."+d.dataset.fold)==="open";}catch(e){}
+    d.open=open;
+  }
 }
 unfold();
 document.addEventListener("toggle",ev=>{
-  if(!ev.target.matches?.("details.folded"))return;
-  try{localStorage.setItem("torrent-box.folded",ev.target.open?"open":"closed");}catch(e){}
+  if(!ev.target.matches?.("details[data-fold]"))return;
+  try{localStorage.setItem("torrent-box."+ev.target.dataset.fold,ev.target.open?"open":"closed");}catch(e){}
 },true);
 function localTimes(){  // the box's times in the viewer's time zone
   for(const t of document.querySelectorAll("time[datetime]")){
@@ -1405,7 +1598,7 @@ function localTimes(){  // the box's times in the viewer's time zone
 }
 localTimes();
 function busy(){  // don't swap the page under someone typing a code
-  return document.querySelector("main details[open]:not(.folded), main .alert.open")||
+  return document.querySelector("main details[open]:not([data-fold]), main .alert.open")||
     [...document.querySelectorAll("main input")].some(i=>i.value)||
     document.activeElement?.closest?.("main form");
 }
@@ -1439,6 +1632,124 @@ document.addEventListener("submit",ev=>{
 
 def upstream_lines(c):
     return [f"not its own problem: {m}" for m in c["upstream"]]
+
+
+def sparkline(points, now, top, warn=False):
+    """An hour of (time, percent) as a small line, 0 at the bottom and top at the top."""
+    if len(points) < 2:
+        return '<div class="none">the last hour shows up here</div>'
+    w, h = 132, 30
+    xy = [(max(0, (t - now + 3600) / 3600) * w, h - 1 - min(v, top) / top * (h - 2))
+          for t, v in points]
+    line = " ".join(f"{x:.1f},{y:.1f}" for x, y in xy)
+    area = f"M{xy[0][0]:.1f},{h} L{line.replace(' ', ' L')} L{xy[-1][0]:.1f},{h} Z"
+    return (f'<svg class="spark{" warn" if warn else ""}" viewBox="0 0 {w} {h}" '
+            f'preserveAspectRatio="none" aria-hidden="true">'
+            f'<path d="{area}" fill="currentColor" opacity=".15"/>'
+            f'<polyline points="{line}" fill="none" stroke="currentColor" stroke-width="1.5" '
+            f'vector-effect="non-scaling-stroke" stroke-linejoin="round"/></svg>')
+
+
+def meter(label, value, note="", bar="", spark="", caption=""):
+    """One line of meters: a label, a bar (or none), the value with a note, and the last hour."""
+    e = html.escape
+    return (f'<div class="meter{"" if bar else " nobar"}"><span>{e(label)}</span>{bar}'
+            f'<div class="val"><b>{e(value)}</b><small>{e(note)}</small></div>'
+            f'<div class="sp">{spark}' + (f'<small>{e(caption)}</small>' if caption else "")
+            + '</div></div>')
+
+
+def bar_html(percents, warn=False, title=""):
+    """A bar of one or more parts (the first solid, then the cache's lighter)."""
+    parts = "".join(f'<i{" class=\"cache\"" if i else ""} style="width:{p:.1f}%"></i>'
+                    for i, p in enumerate(percents))
+    title = f' title="{html.escape(title)}"' if title else ""
+    return f'<div class="bar{" warn" if warn else ""}"{title}>{parts}</div>'
+
+
+def more_html(cid, summary, inside):
+    """A row's summary that opens to show its meters; open or not is kept per browser."""
+    return (f'<details class="more" data-fold="more-{cid}"><summary>{summary}'
+            f'<span class="chev">›</span></summary>{inside}</details>')
+
+
+def disk_io_html(c, now):
+    """The disk's health, opening to its reads and writes, with their last hour."""
+    e = html.escape
+    summary, out = e(c["summary"]), []
+    for disk in c.get("io", []):
+        history = disk["history"]
+        peak = max((max(r, w) for _, r, w, _ in history), default=0)
+        top = max(1 << 20, peak * 1.15)  # at least 1 MB/s: idle isn't a wobbly line
+        busy = ("" if disk["busy"] is None else
+                " · idle" if disk["busy"] < 0.5 else f" · busy {disk['busy']:.0f}%")
+        if len(c["io"]) > 1:  # each says which, and how busy
+            out.append(f'<div class="muted">{e(disk["name"] + busy)}</div>')
+        else:
+            summary += e(busy)
+        meters = []
+        for i, label in ((1, "Read"), (2, "Write")):
+            rate = disk[label.lower()]
+            meters.append(meter(
+                label, "–" if rate is None else short_speed(rate),
+                f"peak {short_speed(max(h[i] for h in history))}" if len(history) > 1 else "",
+                spark=sparkline([(h[0], h[i]) for h in history], now, top),
+                caption="last hour" if len(history) > 1 else ""))
+        out.append(f'<div class="meters">{"".join(meters)}</div>')
+    return more_html("disk", summary, "".join(out)) if out else summary
+
+
+def short_size(n):
+    """Bytes as short as a meter needs: "1.0 GB" rather than "1011.6 MB", "863 GB"."""
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if n < 1000 or unit == "TB":
+            return f"{n:.0f} {unit}" if unit == "B" or n >= 100 else f"{n:.1f} {unit}"
+        n /= 1024
+
+
+def size_of(part, whole):
+    """"4.3 / 12.9 GB": the unit once when both have the same."""
+    (n, unit), whole = short_size(part).split(), short_size(whole)
+    return f"{n} / {whole}" if whole.endswith(" " + unit) else f"{n} {unit} / {whole}"
+
+
+def system_html(c, now):
+    """The System row's summary, opening to meters: CPU and memory with their last hour, and
+    the OS disk."""
+    m = c.get("metrics") or {}
+    history = m.get("history", [])
+    meters = []
+    if "load" in m:
+        cpu = m.get("cpu")
+        shown = cpu if cpu is not None else min(100, m["load"] * 100 / (m["cpus"] or 1))
+        peak = max((v for _, v, _ in history), default=0)
+        top = max(10, peak * 1.15)  # mostly idle: a 0-100 scale would be a flat line
+        meters.append(meter(
+            "CPU", f"{shown:.0f}%", f"load {m['load']:.2f} · {m['cpus']} CPUs",
+            bar_html([shown], shown >= 90),
+            sparkline([(t, v) for t, v, _ in history], now, top, peak >= 90),
+            f"last hour · peak {peak:.0f}%" if len(history) > 1 else ""))
+    if "memory" in m:
+        mem = m["memory"]
+        total = mem["total"] or 1
+        used = mem["used"] * 100 / total
+        meters.append(meter(
+            "Memory", f"{used:.0f}%",
+            f"{size_of(mem['used'], mem['total'])} · cache {short_size(mem['cache'])}",
+            bar_html([used, mem["cache"] * 100 / total], used >= 90,
+                     f"apps {human_size(mem['used'])}, cache {human_size(mem['cache'])} "
+                     f"(given back when apps need it), free {human_size(mem['free'])}"),
+            sparkline([(t, v) for t, _, v in history], now, 100, used >= 90),
+            "last hour" if len(history) > 1 else ""))
+    if "disk" in m:
+        d = m["disk"]
+        meters.append(meter(
+            "OS disk", f"{d['percent']}%",
+            f"{short_size(d['free'])} free of {short_size(d['used'] + d['free'])}",
+            bar_html([d["percent"]], d["percent"] >= 90)))
+    summary = html.escape(c["summary"])
+    return more_html("system", summary, f'<div class="meters">{"".join(meters)}</div>') \
+        if meters else summary
 
 
 def details_html(details):
@@ -1557,7 +1868,7 @@ def folded_html(status, https, tailnet):
     else:
         state = (f'<span class="muted">all {len(ids)} fine<span class="why"> · rarely needed once '
                  f'setup.sh has set them up</span></span>')
-    return (f'<details class="folded"><summary><span class="chev">›</span><h3>{e(GROUPS[-1][0])}</h3>'
+    return (f'<details class="folded" data-fold="folded"><summary><span class="chev">›</span><h3>{e(GROUPS[-1][0])}</h3>'
             f'<span class="faces">{"".join(faces)}</span>{state}</summary>'
             f'<div class="apps">{"".join(apps)}</div></details>')
 
@@ -1738,8 +2049,12 @@ def render(status, host, https=False):
         if cid not in checks:
             continue
         c = checks[cid]
-        extra = ""
-        if cid == "storage":
+        extra, body = "", e(c["summary"])
+        if cid == "system":
+            body = system_html(c, status["time"])
+        elif cid == "disk":
+            body = disk_io_html(c, status["time"])
+        elif cid == "storage":
             if "percent" in c:
                 extra = (f'<div class="bar {c["state"]}"><i style="width:{c["percent"]}%"></i></div>'
                          f'<div class="muted">{e(status["storage_root"])}</div>')
@@ -1763,7 +2078,7 @@ def render(status, host, https=False):
             f'<div class="row" id="{cid}"><div class="label">'
             f'<span class="ricon">{glyph(ROW_ICONS[cid], "currentColor")}</span><b>{name}</b>'
             f'<span class="dot {c["state"]}" title="{c["state"]}"></span></div>'
-            f'<div>{e(c["summary"])}{extra}{details_html(c["details"] + upstream_lines(c))}</div></div>')
+            f'<div>{body}{extra}{details_html(c["details"] + upstream_lines(c))}</div></div>')
 
     hostname = e(status["hostname"])
     # The box's clock is often UTC: the script shows it in the viewer's time zone, and without
