@@ -197,10 +197,24 @@ def merge_settings(current, ours, keep_password=False):
     for key, value in ours.items():
         if key == "rpc-password" and keep:
             continue
+        if key in current and same_setting(key, current[key], value):
+            continue  # the same value as Transmission writes it
         merged[key] = value
     missing = object()
     changed = sorted(k for k in merged if current.get(k, missing) != merged[k])
     return merged, changed
+
+
+def same_setting(key, a, b):
+    """Transmission 4 saves umask as an octal string ("002"), 3 as a number (2): the same."""
+    if key == "umask":
+        def value(v):
+            try:
+                return int(v, 8) if isinstance(v, str) else v
+            except ValueError:
+                return v
+        return value(a) == value(b)
+    return a == b
 
 
 def speed_settings(mbps, mem_mb):

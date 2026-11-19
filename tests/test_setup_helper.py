@@ -115,6 +115,15 @@ class SettingsTest(unittest.TestCase):
         self.assertEqual(once, twice)
         self.assertEqual(changed, [])
 
+    def test_umask_as_transmission_4_saves_it(self):
+        # Transmission 4 writes umask back as an octal string: not a change each run
+        once, _ = sh.merge_settings(self.DEBIAN, self.ours())
+        saved = dict(once, umask="002")
+        merged, changed = sh.merge_settings(saved, self.ours())
+        self.assertEqual(changed, [])
+        self.assertEqual(merged["umask"], "002")
+        self.assertIn("umask", sh.merge_settings(dict(once, umask="022"), self.ours())[1])
+
     def test_keep_password_when_login_works(self):
         # After Transmission hashed our password, a re-run with a working login changes nothing.
         hashed = dict(sh.merge_settings(self.DEBIAN, self.ours())[0], **{"rpc-password": "{hash"})
