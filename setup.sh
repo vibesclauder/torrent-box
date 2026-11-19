@@ -252,7 +252,12 @@ helper() { PYTHONDONTWRITEBYTECODE=1 python3 "$REPO/setup_helper.py" "$@"; }
 # Returns 0 if DEST changed (or would change), 1 if it was up to date.
 update_file() {
     local src=$1 dest=$2 mode=$3 owner=${4:-}
-    if [[ -f $dest ]] && cmp -s "$src" "$dest"; then
+    if [[ -f $dest ]] && { cmp -s "$src" "$dest" ||
+            # root's own file (push holds the topic): compared as root, else it's new every run.
+            # A dry run doesn't ask for the password for it.
+            { [[ ! -r $dest && $owner == root ]] &&
+              if (( DRY_RUN )); then sudo -n cmp -s "$src" "$dest" 2>/dev/null
+              else sudo cmp -s "$src" "$dest"; fi; }; }; then
         info "up to date: $dest"
         return 1
     fi
