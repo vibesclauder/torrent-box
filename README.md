@@ -436,7 +436,8 @@ its Seerr: browse and search StashDB, request scenes, approve other users' reque
 performers and studios. Setup connects Whisparr like Radarr: the login, Transmission (with
 its own folder under `downloads/`), Prowlarr (which syncs it the indexers for its
 categories) and those categories' folders from `[routes]` as root folders (videos only).
-Desireerr comes from its own repo: setup clones it to `~/desireerr`, fast-forwards it on
+Desireerr comes from its own repo: setup clones it to `~/desireerr` (or uses the
+checkout beside torrent-box's, if there is one), fast-forwards it on
 each run (not if it has local changes) and runs it as a user unit
 (`journalctl --user -u desireerr`). Its admin is the login all the apps share (and follows
 it when it changes). It browses StashDB with your API key (stashdb.org, your profile):

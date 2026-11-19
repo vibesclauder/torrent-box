@@ -43,7 +43,10 @@ DASHBOARD_PORT=80  # the box's name alone opens the start page
 DASHBOARD_ICONS=/usr/local/share/torrent-box/icons  # dashboard.WEBAPP_ICON_DIRS
 INSTALLED=/usr/local/share/torrent-box/installed.json  # dashboard.INSTALLED_FILE
 DESIREERR_REPO=https://github.com/vibesclauder/desireerr.git  # requests for StashDB scenes (public)
-DESIREERR_DIR=$HOME/desireerr  # its user unit runs %h/desireerr/desireerr.py
+# Desireerr's checkout: beside torrent-box's if it's there, else ~/desireerr, where its own unit
+# runs %h/desireerr/desireerr.py (anywhere else, our drop-in says where).
+DESIREERR_DIR=$HOME/desireerr
+if [[ -d $(dirname "$REPO")/desireerr/.git ]]; then DESIREERR_DIR=$(dirname "$REPO")/desireerr; fi
 DESIREERR_PORT=5056
 DESIREERR_DATA=$HOME/.local/state/desireerr  # its unit's StateDirectory
 LIB=/usr/local/lib/torrent-box  # root's scripts: push, smartd-notify, arr-update
@@ -1983,7 +1986,7 @@ setup_rss2transmission() {
 # dashboard.py on port 80: links to the web apps and their health. A system unit running as
 # you (see systemd/torrent-box-dashboard.service); the program is root's, since it runs with
 # the capability to use a low port.
-# Desireerr, with Whisparr: its own (public) repo, cloned to ~/desireerr and fast-forwarded
+# Desireerr, with Whisparr: its own (public) repo, cloned to DESIREERR_DIR and fast-forwarded
 # on each run unless it has local changes, run by a user unit like rss2transmission. With
 # Whisparr switched off, the unit goes; the checkout and its data (~/.local/state/desireerr)
 # stay.
@@ -2035,10 +2038,16 @@ setup_desireerr() {
     fi
     # It writes the scenes' .nfo files for Jellyfin beside them: the storage disk is writable
     # in its sandbox (the rest stays read-only). And it reads Whisparr's API key from the
-    # config.xml in Whisparr's container folder.
+    # config.xml in Whisparr's container folder. A checkout other than ~/desireerr: its unit's
+    # command, run from there.
     printf '%s\n' "# torrent-box: Desireerr writes the scenes' .nfo files and reads Whisparr's key (setup.sh writes this)" \
         "[Service]" "ReadWritePaths=-$storage_root" \
         "Environment=DESIREERR_WHISPARR_CONFIG=$ARR_DIR/whisparr/config.xml" >"$TMP/desireerr-storage.conf"
+    if [[ $DESIREERR_DIR != "$HOME/desireerr" ]]; then
+        local exec_start
+        exec_start=$(grep -m1 '^ExecStart=' "$DESIREERR_DIR/systemd/desireerr.service")
+        printf '%s\n' "ExecStart=" "${exec_start//%h\/desireerr\//$DESIREERR_DIR/}" >>"$TMP/desireerr-storage.conf"
+    fi
     if update_file "$TMP/desireerr-storage.conf" "$USER_UNITS/desireerr.service.d/torrent-box.conf" 644; then
         changed=1
     fi
