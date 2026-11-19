@@ -476,7 +476,10 @@ class NtfyCheckTest(unittest.TestCase):
     def test_version_in_the_footer(self):
         status = {"time": 0, "hostname": "box", "storage_root": "/mnt/storage", "checks": {}}
         self.assertIn("<span>torrent-box · <a", db.render(status, "box"))  # not installed
-        with mock.patch.object(db, "VERSION", "1.0 rev 2, 2026-11-09 13:31"):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(db, "VERSION", "1.0 rev 2"), \
+                mock.patch.object(db, "INSTALLED_FILE", Path(tmp) / "installed.json"):
+            self.assertIn("<span>torrent-box 1.0 rev 2 · <a", db.render(status, "box"))
+            db.INSTALLED_FILE.write_text('{"commit": "abc", "date": "2026-11-09 13:31", "repo": "/r"}')
             self.assertIn("<span>torrent-box 1.0 rev 2, 2026-11-09 13:31 · <a",
                           db.render(status, "box"))
 
@@ -1115,9 +1118,9 @@ if __name__ == "__main__":
     unittest.main()
 
 
-def fake_github(ahead, version="1.1 rev 0", version_ahead=None):
-    """GitHub's API for check_update: BRANCH is `ahead` commits past the installed one, and
-    `version_ahead` (default: all of them) past the commit that last changed VERSION."""
+def fake_github(ahead, version="1.1 rev 2"):
+    """GitHub's API for check_update: BRANCH is `ahead` commits past the installed one, and its
+    VERSION says `version`."""
     commits = [{"sha": f"sha{i}", "commit": {"message": f"Change {i}\n\nbody",
                                              "committer": {"date": "2026-11-20T09:30:00Z"}}}
                for i in range(1, ahead + 1)]
@@ -1126,12 +1129,8 @@ def fake_github(ahead, version="1.1 rev 0", version_ahead=None):
         if path.startswith("compare/installed..."):
             return {"ahead_by": ahead, "commits": commits,
                     "html_url": "https://github.com/x/compare/installed...main"}
-        if path.startswith("commits?"):
-            return [{"sha": "base"}]
-        if path.startswith("contents/VERSION"):
+        if path == f"contents/VERSION?ref=sha{ahead}":
             return {"content": base64.b64encode(version.encode() + b"\n").decode()}
-        if path.startswith("compare/base..."):
-            return {"ahead_by": ahead if version_ahead is None else version_ahead}
         raise AssertionError(path)
     return fetch
 
@@ -1140,7 +1139,7 @@ class UpdateTest(unittest.TestCase):
     def test_check(self):
         self.assertIsNone(db.check_update("", fake_github(3)))  # not installed from git
         self.assertEqual(db.check_update("installed", fake_github(0)), {"commits": 0})
-        info = db.check_update("installed", fake_github(3, version_ahead=2))
+        info = db.check_update("installed", fake_github(3))
         when = time.strftime("%Y-%m-%d %H:%M", time.localtime(1795167000))
         self.assertEqual(info["version"], f"1.1 rev 2, {when}")
         self.assertEqual((info["commits"], info["head"]), (3, "sha3"))
@@ -1152,11 +1151,14 @@ class UpdateTest(unittest.TestCase):
         self.assertTrue(odd["version"].startswith("2.0, "))
 
     def test_command_names_the_checkout(self):
-        with mock.patch.object(db, "REPO_DIR", "/home/me/torrent-box"), \
+        with mock.patch.object(db, "installed", lambda: {"repo": "/home/me/torrent-box"}), \
                 mock.patch("os.path.expanduser", lambda p: "/home/me"):
             self.assertEqual(db.update_command(), "cd ~/torrent-box && git pull && ./setup.sh")
-        with mock.patch.object(db, "REPO_DIR", "/opt/tb"):
+        with mock.patch.object(db, "installed", lambda: {"repo": "/opt/tb"}):
             self.assertEqual(db.update_command(), "cd /opt/tb && git pull && ./setup.sh")
+        with mock.patch.object(db, "INSTALLED_FILE", Path("/nonexistent/installed.json")):
+            self.assertEqual(db.update_command(), "cd torrent-box && git pull && ./setup.sh")
+            self.assertIsNone(db.check_update(fetch=fake_github(3)))  # no commit: no checks
 
     def test_push_once_per_head_at_most_daily(self):
         with FakeServer() as server, tempfile.TemporaryDirectory() as tmp:
@@ -1166,7 +1168,7 @@ class UpdateTest(unittest.TestCase):
             ahead = [2]
             check = lambda: db.check_update("installed", fake_github(ahead[0]))  # noqa: E731
             u = db.Updates(state, check)
-            with mock.patch("sys.stderr"), mock.patch.object(db, "VERSION", "1.1 rev 0, x"):
+            with mock.patch("sys.stderr"), mock.patch.object(db, "version_text", lambda: "1.1 rev 0, x"):
                 u.poll(s, 1000)
                 self.assertEqual(len(server.pushes), 1)
                 push = server.pushes[0]

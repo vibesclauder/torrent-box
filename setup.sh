@@ -41,6 +41,7 @@ DASHBOARD_BIN=/usr/local/bin/torrent-box-dashboard
 DASHBOARD_UNIT=/etc/systemd/system/torrent-box-dashboard.service
 DASHBOARD_PORT=80  # the box's name alone opens the start page
 DASHBOARD_ICONS=/usr/local/share/torrent-box/icons  # dashboard.WEBAPP_ICON_DIRS
+INSTALLED=/usr/local/share/torrent-box/installed.json  # dashboard.INSTALLED_FILE
 DESIREERR_REPO=https://github.com/vibesclauder/desireerr.git  # requests for StashDB scenes (public)
 DESIREERR_DIR=$HOME/desireerr  # its user unit runs %h/desireerr/desireerr.py
 DESIREERR_PORT=5056
@@ -122,30 +123,25 @@ EOF
     printf '%55s\n\n' "$TB_VERSION"
 }
 
-# "1.0 rev 2, 2026-11-09 13:31": VERSION's number, one revision more for each commit since
-# the one that last changed VERSION, and when the checked-out commit was made. Without git
-# history (a downloaded archive) just what VERSION says.
+# TB_NUMBER: "1.0 rev 2", what VERSION says; its rev goes up with every commit that changes
+# code. TB_DATE: when the checked-out commit was made (none without git history, as in a
+# downloaded archive). TB_VERSION: both, as setup shows it.
 repo_version() {
-    local v base n
-    v=$(<"$REPO/VERSION")
-    git -C "$REPO" rev-parse -q --verify HEAD >/dev/null 2>&1 || { printf '%s' "$v"; return; }
-    base=$(git -C "$REPO" log -1 --format=%H -- VERSION 2>/dev/null || true)
-    if [[ -n $base && $v =~ ^(.*rev\ )([0-9]+)$ ]]; then
-        n=$(git -C "$REPO" rev-list --count "$base..HEAD" 2>/dev/null || echo 0)
-        v=${BASH_REMATCH[1]}$((BASH_REMATCH[2] + n))
+    TB_NUMBER=$(<"$REPO/VERSION")
+    TB_COMMIT=$(git -C "$REPO" rev-parse -q --verify HEAD 2>/dev/null || true)
+    TB_DATE=
+    if [[ -n $TB_COMMIT ]]; then
+        TB_DATE=$(git -C "$REPO" log -1 --format=%cd --date=format-local:'%Y-%m-%d %H:%M')
     fi
-    printf '%s, %s' "$v" "$(git -C "$REPO" log -1 --format=%cd --date=format-local:'%Y-%m-%d %H:%M')"
+    TB_VERSION=$TB_NUMBER${TB_DATE:+, $TB_DATE}
 }
 
-# A copy of the program SRC with the version written into its VERSION = "" line, to install;
-# also the commit and the checkout into COMMIT = "" / REPO_DIR = "" (the start page's update
-# check), where it has them.
+# A copy of the program SRC with the version number written into its VERSION = "" line, to
+# install. Only the number: the program changes (and restarts) only when the rev goes up.
 stamped() {
     local out
     out=$TMP/$(basename "$1")
-    sed -e "s|^VERSION = \"\".*|VERSION = \"$TB_VERSION\"|" \
-        -e "s|^COMMIT = \"\".*|COMMIT = \"$TB_COMMIT\"|" \
-        -e "s|^REPO_DIR = \"\".*|REPO_DIR = \"$REPO\"|" "$1" >"$out"
+    sed -e "s|^VERSION = \"\".*|VERSION = \"$TB_NUMBER\"|" "$1" >"$out"
     printf '%s' "$out"
 }
 
@@ -2114,6 +2110,17 @@ setup_dashboard() {
     step "Start page (http://$(hostname)/)"
     local changed=0
     if update_file "$(stamped "$REPO/dashboard.py")" "$DASHBOARD_BIN" 755 root; then changed=1; fi
+    # The commit, its date and the checkout, for the update check: read when needed, so a new
+    # commit alone needs no restart, and isn't listed as a change.
+    python3 -c 'import json, sys; print(json.dumps(dict(zip(("commit", "date", "repo"), sys.argv[1:]))))' \
+        "$TB_COMMIT" "$TB_DATE" "$REPO" >"$TMP/installed.json"
+    if ! cmp -s "$TMP/installed.json" "$INSTALLED"; then
+        if (( DRY_RUN )); then
+            info "would write $INSTALLED (the commit, for the update check)"
+        else
+            sudo install -D -m 644 "$TMP/installed.json" "$INSTALLED"
+        fi
+    fi
     local icon  # for installing the page as an app (read on each request: no restart)
     for icon in "$REPO"/icons/*.png; do
         update_file "$icon" "$DASHBOARD_ICONS/${icon##*/}" 644 root || true
@@ -2466,8 +2473,7 @@ main() {
 
     TMP=$(mktemp -d -t torrent-box-setup.XXXXXX)
     trap 'rm -rf "$TMP"' EXIT
-    TB_VERSION=$(repo_version)
-    TB_COMMIT=$(git -C "$REPO" rev-parse -q --verify HEAD 2>/dev/null || true)
+    repo_version
     banner
     if (( DRY_RUN )); then
         echo "Dry run: showing what would be done; nothing is changed."

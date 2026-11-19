@@ -40,7 +40,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-VERSION = ""  # "1.0 rev 2, 2026-11-09 13:31": setup.sh writes it in when installing
+VERSION = ""  # "1.0 rev 2": setup.sh writes it in when installing
 DEFAULT_CONFIG = Path("~/.config/rss2transmission/config.ini").expanduser()
 DEFAULT_STATE = Path("~/.local/state/rss2transmission/state.sqlite").expanduser()
 USER_AGENT = "rss2transmission/1.0"

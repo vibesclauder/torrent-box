@@ -39,9 +39,10 @@ from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-VERSION = ""  # "1.0 rev 2, 2026-11-09 13:31": setup.sh writes it in when installing
-COMMIT = ""  # the commit it was installed from (setup.sh too); none: no update checks
-REPO_DIR = ""  # the checkout setup.sh ran from, for the update banner's "git pull"
+VERSION = ""  # "1.0 rev 2": setup.sh writes it in when installing
+# What setup.sh installed from: {"commit", "date", "repo"} (read when needed, so a new commit
+# alone doesn't change this program and restart it). No commit: no update checks.
+INSTALLED_FILE = Path("/usr/local/share/torrent-box/installed.json")
 GITHUB_REPO = "vibesclauder/torrent-box"
 BRANCH = "main"
 UPDATE_EVERY = 6 * 3600  # how often GitHub is asked (60 requests an hour are free)
@@ -1142,15 +1143,26 @@ def github(path, timeout=15):
         timeout=timeout))
 
 
-def remote_version(fetch, head_date):
-    """The version setup.sh would install from BRANCH: VERSION's number, one revision more per
-    commit since VERSION last changed, and the newest commit's time (as setup.sh's
-    repo_version)."""
-    base = fetch(f"commits?sha={BRANCH}&path=VERSION&per_page=1")[0]["sha"]
-    number = base64.b64decode(fetch(f"contents/VERSION?ref={base}")["content"]).decode().strip()
-    m = re.fullmatch(r"(.*rev )(\d+)", number)
-    if m:
-        number = f"{m.group(1)}{int(m.group(2)) + fetch(f'compare/{base}...{BRANCH}')['ahead_by']}"
+def installed(path=None):
+    """INSTALLED_FILE's {"commit", "date", "repo"}; {} when it isn't there."""
+    try:
+        info = json.loads(Path(path or INSTALLED_FILE).read_text(encoding="utf-8"))
+        return info if isinstance(info, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def version_text():
+    """'1.0 rev 2, 2026-11-09 13:31': the version and when its commit was made (as setup.sh
+    shows it); "" when not installed by setup.sh."""
+    date = installed().get("date")
+    return f"{VERSION}, {date}" if VERSION and date else VERSION
+
+
+def remote_version(fetch, head, head_date):
+    """The version setup.sh would install from BRANCH: VERSION at its newest commit HEAD, and
+    that commit's time (as version_text)."""
+    number = base64.b64decode(fetch(f"contents/VERSION?ref={head}")["content"]).decode().strip()
     when = time.localtime(calendar.timegm(time.strptime(head_date, "%Y-%m-%dT%H:%M:%SZ")))
     return f"{number}, {time.strftime('%Y-%m-%d %H:%M', when)}"
 
@@ -1158,7 +1170,7 @@ def remote_version(fetch, head_date):
 def check_update(commit=None, fetch=github):
     """None when there's nothing to compare (not installed from git); else what BRANCH has
     that the installed commit hasn't: {"commits": 0} when nothing."""
-    commit = COMMIT if commit is None else commit
+    commit = installed().get("commit", "") if commit is None else commit
     if not commit:
         return None
     diff = fetch(f"compare/{commit}...{BRANCH}")
@@ -1166,14 +1178,15 @@ def check_update(commit=None, fetch=github):
         return {"commits": 0}
     commits = diff["commits"]  # oldest first
     return {"commits": diff["ahead_by"], "head": commits[-1]["sha"],
-            "version": remote_version(fetch, commits[-1]["commit"]["committer"]["date"]),
+            "version": remote_version(fetch, commits[-1]["sha"],
+                                      commits[-1]["commit"]["committer"]["date"]),
             "subjects": [c["commit"]["message"].split("\n", 1)[0] for c in reversed(commits)]
                         [:UPDATE_SUBJECTS],
             "url": diff.get("html_url") or f"https://github.com/{GITHUB_REPO}"}
 
 
 def update_command():
-    where = REPO_DIR or "torrent-box"
+    where = installed().get("repo") or "torrent-box"
     home = os.path.expanduser("~")
     if home != "/" and (where == home or where.startswith(home + "/")):
         where = "~" + where[len(home):]
@@ -1210,7 +1223,7 @@ class Updates:
                 or now - self.pushed.get("time", now - UPDATE_PUSH_EVERY) < UPDATE_PUSH_EVERY:
             return
         n = info["commits"]
-        message = "\n".join([f"{n} new commit{'s' if n > 1 else ''} (you have {VERSION or '?'}):",
+        message = "\n".join([f"{n} new commit{'s' if n > 1 else ''} (you have {version_text() or '?'}):",
                              *(f"• {line}" for line in info["subjects"]),
                              *([f"… and {n - len(info['subjects'])} more"]
                                if n > len(info["subjects"]) else []),
@@ -2051,7 +2064,7 @@ def render(status, host, https=False):
             items += f"<li>… and {n - len(update['subjects'])} more</li>"
         banner += (f'<div class="banner update"><b>Update available: torrent-box '
                    f'{e(update["version"])}</b> <span class="muted">({n} new commit'
-                   f'{"s" if n > 1 else ""}; you have {e(VERSION or "?")})</span><ul>{items}</ul>'
+                   f'{"s" if n > 1 else ""}; you have {e(version_text() or "?")})</span><ul>{items}</ul>'
                    f'<div class="muted">To update, on the box: <code>{e(update_command())}</code>'
                    f' · <a href="{e(update["url"])}">what changed</a></div></div>')
 
@@ -2134,7 +2147,7 @@ def render(status, host, https=False):
 <h2>Health</h2>
 <div class="rows">{"".join(rows)}</div>
 <footer><span id="updated">Updated {updated}, refreshes every {REFRESH_SECONDS} s.</span>
-<span>torrent-box{" " + e(VERSION) if VERSION else ""}{tailnet_link} · <a href="https://github.com/{GITHUB_REPO}">GitHub</a></span></footer>
+<span>torrent-box{" " + e(version_text()) if VERSION else ""}{tailnet_link} · <a href="https://github.com/{GITHUB_REPO}">GitHub</a></span></footer>
 </main>
 </div><script>{SCRIPT}</script></body></html>
 """

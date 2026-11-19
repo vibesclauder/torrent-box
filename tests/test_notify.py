@@ -149,10 +149,10 @@ class NtfyAndCliTest(unittest.TestCase):
         self.assertNotIn("torrent-box ", self.server.pushes[0]["message"])  # not installed
 
     def test_test_notify_says_the_version(self):
-        with mock.patch.object(r2t, "VERSION", "1.0 rev 2, 2026-11-09 13:31"):
+        with mock.patch.object(r2t, "VERSION", "1.0 rev 2"):
             self.assertEqual(r2t.main(["-c", str(self.config), "--test-notify"]), 0)
         self.assertTrue(self.server.pushes[0]["message"].endswith(
-            "work.\ntorrent-box 1.0 rev 2, 2026-11-09 13:31"))
+            "work.\ntorrent-box 1.0 rev 2"))
 
     def test_test_notify_failures(self):
         self.server.ntfy_down = True
