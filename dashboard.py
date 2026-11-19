@@ -1938,16 +1938,26 @@ def port_url(host, port, https=False, tailnet=None):
     return f"https://{html.escape((tailnet or {}).get('name') or host)}:{port + HTTPS_OFFSET}/"
 
 
-def frame_src(cid, host, port, https=False, tailnet=None):
+def frame_src(cid, host, port, https=False, tailnet=None, at=""):
     if cid == "transmission":
         return "/transmission/web/"
-    return port_url(host, port, https, tailnet)
+    return port_url(host, port, https, tailnet) + html.escape(at[1:])
 
 
-def render_open(status, cid, host, https=False):
+def frame_at(query):
+    """?at=: where in the app the frame was (an app that says so, see OPEN_SCRIPT), a path on
+    the app's own host, or "" for its start page."""
+    at = urllib.parse.parse_qs(query).get("at", [""])[0]
+    if not re.fullmatch(r"/(?![/\\])[^\\\x00-\x20\x7f]{0,2000}", at):
+        return ""
+    return at
+
+
+def render_open(status, cid, host, https=False, at=""):
     """/open/<app>: the app in a frame under a bar with the logo back to the start page, the
     apps in their GROUPS to switch to (the folded group as a menu) and a link to open it on its
-    own. The links go where the start page's tiles go (tile_href)."""
+    own. The links go where the start page's tiles go (tile_href). AT: the page in the app to
+    open (frame_at)."""
     e = html.escape
     checks = status["checks"]
     tailnet = checks.get("tailscale")
@@ -1992,7 +2002,7 @@ def render_open(status, cid, host, https=False):
 <span class="sep"></span><div class="apps">{'<span class="sep"></span>'.join(parts)}</div>
 <a class="own" href="{app_url(host, port, https, tailnet)}" target="_blank" rel="noopener" title="Open {e(name)} on its own">
 <span>Open on its own</span> ↗</a></nav>
-<iframe src="{frame_src(cid, host, port, https, tailnet)}" title="{e(name)}" allow="fullscreen; autoplay; clipboard-read; clipboard-write"></iframe>
+<iframe src="{frame_src(cid, host, port, https, tailnet, at)}" title="{e(name)}" allow="fullscreen; autoplay; clipboard-read; clipboard-write"></iframe>
 <script>{OPEN_SCRIPT}</script>
 </body></html>
 """
@@ -2002,6 +2012,18 @@ OPEN_SCRIPT = PROBE_SCRIPT + """
 useReachable();
 document.addEventListener("click",ev=>{  // a click elsewhere closes the menu
   for(const d of document.querySelectorAll("details.folded[open]"))if(!d.contains(ev.target))d.open=false;
+});
+// An app that says where it is (Desireerr does) keeps it in our address as ?at=, so a reload or
+// a bookmark opens that page again; "Open on its own" goes there too.
+const frame=document.querySelector("iframe"),own=document.querySelector("a.own");
+addEventListener("message",ev=>{
+  const at=ev.data&&ev.data.at;
+  if(ev.source!==frame.contentWindow||typeof at!=="string"||!/^\\/(?![\\/\\\\])/.test(at))return;
+  const url=new URL(location.href);
+  if(at==="/")url.searchParams.delete("at");else url.searchParams.set("at",at);
+  history.replaceState(null,"",url);
+  own.href=new URL(at,own.href).href;
+  if(own.dataset.fallback)own.dataset.fallback=new URL(at,own.dataset.fallback).href;
 });
 """
 
@@ -2298,7 +2320,8 @@ class Handler(BaseHTTPRequestHandler):
                 and any(t[0] == path[6:] for t in TILES):
             body = render_open(self.status.get(), path[6:],
                                link_host(self.headers.get("Host"), socket.gethostname()),
-                               https=self.headers.get("X-Forwarded-Proto") == "https").encode()
+                               https=self.headers.get("X-Forwarded-Proto") == "https",
+                               at=frame_at(self.path.partition("?")[2])).encode()
             kind = "text/html; charset=utf-8"
         elif path == "/transmission" or path.startswith("/transmission/"):
             self.proxy_transmission()

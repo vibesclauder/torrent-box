@@ -994,6 +994,16 @@ class PageTest(unittest.TestCase):
         self.assertIn('<iframe src="/transmission/web/"', page)
         self.assertIn('href="http://box.lan:9091/" target="_blank"', page)
 
+    def test_open_page_at(self):
+        # where the framed app said it was (?at=) opens again after a reload
+        page = db.render_open(self.STATUS, "prowlarr", "box.lan", at="/performer/1?q=a&b=c#x")
+        self.assertIn('<iframe src="http://box.lan:9696/performer/1?q=a&amp;b=c#x"', page)
+        self.assertIn("frame.contentWindow", page)
+        self.assertEqual(db.frame_at("at=%2Fscene%2Fab-12%3Fsort%3Ddate"), "/scene/ab-12?sort=date")
+        for bad in ("at=%2F%2Fevil.example%2F", "at=%2F%5Cevil.example", "at=http%3A%2F%2Fx%2F",
+                    "at=scene", "at=%2Fa%20b", "at=%2Fa%0Ab", ""):
+            self.assertEqual(db.frame_at(bad), "", bad)
+
     def test_transmission_passed_through(self):
         with tempfile.TemporaryDirectory() as tmp, FakeServer() as tr:
             status = db.Status(Path(tmp) / "config.ini", Path(tmp))
