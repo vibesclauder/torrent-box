@@ -912,7 +912,9 @@ def fetch_icon(address, port, paths, timeout=OTHERS_TIMEOUT):
 def web_page(address, port, timeout=OTHERS_TIMEOUT):
     """What answers at address:port, if it's a web page: (its title, a digest of the page, to
     tell one app on two ports from two apps, the paths of its icons, best first), else None.
-    Follows one redirect on the same server (a login page, say). This page itself is None."""
+    Follows one redirect on the same server (a login page, say). This page itself is None.
+    A page that turns us away (401/403: the app behind a login or a Tailscale identity check,
+    which our probe doesn't pass) has no digest: other_services matches it by its title."""
     path = "/"
     for _ in range(2):
         conn = http.client.HTTPConnection(address, port, timeout=timeout)
@@ -926,16 +928,18 @@ def web_page(address, port, timeout=OTHERS_TIMEOUT):
                     and not location.startswith("//") and path == "/":
                 path = location
                 continue
-            if resp.status >= 400 or "html" not in (resp.getheader("Content-Type") or ""):
+            if "html" not in (resp.getheader("Content-Type") or "") \
+                    or resp.status >= 400 and resp.status not in (401, 403):
                 return None  # an error page isn't the app
             body = resp.read(OTHERS_READ)
+            gated = resp.status >= 400
         except (OSError, http.client.HTTPException, ValueError):
             return None
         finally:
             conn.close()
         m = TITLE.search(body)
         title = html.unescape(m[1].decode("utf-8", "replace")).strip() if m else ""
-        return (" ".join(title.split())[:80], hashlib.sha256(body).hexdigest()[:16],
+        return (" ".join(title.split())[:80], None if gated else hashlib.sha256(body).hexdigest()[:16],
                 IconLinks.paths(body, path))
     return None
 
@@ -977,10 +981,13 @@ def other_services(skip=(), sockets=None, https=None, probe=web_page, icon=fetch
     found = {}
     if targets:
         with ThreadPoolExecutor(max_workers=min(16, len(targets))) as pool:
-            for port, address, page in pool.map(look, sorted(targets)):
-                if page is None:
-                    continue
+            looks = [hit for hit in pool.map(look, sorted(targets)) if hit[2] is not None]
+            # a port that turned us away (no digest) joins the app of the same name, else stands alone
+            for port, address, page in sorted(looks, key=lambda hit: hit[2][1] is None):
                 title, digest, icons = page
+                if digest is None:
+                    named = [d for d, entry in found.items() if title and entry["name"] == title]
+                    digest = named[0] if named else hashlib.sha256(f"{title}:{port}".encode()).hexdigest()[:16]
                 if digest not in found:
                     found[digest] = {"name": title or f"Port {port}", "ports": [], "lan": {},
                                      "https": [], "id": digest, "picture": icon(address, port, icons)}
@@ -990,6 +997,7 @@ def other_services(skip=(), sockets=None, https=None, probe=web_page, icon=fetch
                     entry["lan"][str(port)] = targets[port][0]
                 entry["https"] += https.get(port, [])
     for entry in found.values():  # a service's own name (no port) first
+        entry["ports"].sort()
         entry["https"].sort(key=lambda url: (url.count(":") > 1, url))
     return sorted(found.values(), key=lambda e: (e["name"].casefold(), e["ports"]))
 

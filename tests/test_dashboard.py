@@ -878,7 +878,9 @@ class OthersTest(unittest.TestCase):
     def test_one_entry_per_app_and_only_reachable_ones(self):
         pages = {8100: ("Pantry", "aaa", ["/icon.svg"]), 8200: ("Pantry", "aaa", ["/icon.svg"]),
                  5173: ("Pantry", "bbb", []), 8000: ("Dev API", "ccc", []), 9000: ("", "ddd", []),
-                 9091: ("Transmission", "eee", [])}
+                 9091: ("Transmission", "eee", []),
+                 # turned us away (a Tailscale identity check): joins its app by name, or stands alone
+                 8300: ("Bank", None, []), 8400: ("Bank", "fff", ["/b.svg"]), 8500: ("Vault", None, [])}
         probed = []
 
         def probe(address, port):
@@ -887,8 +889,10 @@ class OthersTest(unittest.TestCase):
 
         sockets = {("127.0.0.1", 8100), ("192.168.1.50", 8200), ("127.0.0.1", 5173),
                    ("127.0.0.1", 8000), ("::", 9000), ("0.0.0.0", 9091), ("0.0.0.0", 22),
-                   ("100.101.102.103", 18100), ("fe80::1", 5357), ("0.0.0.0", 7000)}
+                   ("100.101.102.103", 18100), ("fe80::1", 5357), ("0.0.0.0", 7000),
+                   ("127.0.0.1", 8300), ("192.168.1.50", 8400), ("127.0.0.1", 8500)}
         https = {8100: ["https://box.ts.net:18100/", "https://pantry.ts.net/"],
+                 8300: ["https://bank.ts.net/"], 8500: ["https://vault.ts.net/"],
                  5173: ["https://box.ts.net:8443/"]}
         icons = []
 
@@ -897,7 +901,13 @@ class OthersTest(unittest.TestCase):
             return (b"<svg/>", "image/svg+xml") if paths else None
 
         found = db.other_services({9091}, sockets, https, probe, icon)
+        vault = found.pop()
+        self.assertEqual(vault["name"], "Vault")
+        self.assertEqual(vault["https"], ["https://vault.ts.net/"])
+        self.assertEqual(len(vault["id"]), 16)
         self.assertEqual(found, [
+            {"name": "Bank", "ports": [8300, 8400], "lan": {"8400": "192.168.1.50"},
+             "https": ["https://bank.ts.net/"], "id": "fff", "picture": (b"<svg/>", "image/svg+xml")},
             {"name": "Pantry", "ports": [5173], "lan": {}, "https": ["https://box.ts.net:8443/"],
              "id": "bbb", "picture": None},
             {"name": "Pantry", "ports": [8100, 8200], "lan": {"8200": "192.168.1.50"},
@@ -907,7 +917,7 @@ class OthersTest(unittest.TestCase):
              "picture": None},
         ])
         self.assertIn(("127.0.0.1", 8100, ["/icon.svg"]), icons)  # where the page answered
-        self.assertEqual(len(icons), 3)  # once per app
+        self.assertEqual(len(icons), 5)  # once per app
         ports = {port for _, port in probed}
         self.assertNotIn(8000, ports)   # on 127.0.0.1 alone, not served on the tailnet
         self.assertNotIn(9091, ports)   # a tile's
@@ -929,6 +939,7 @@ class OthersTest(unittest.TestCase):
                           "/login": (200, "text/html", b"<html><TITLE>\n My &amp; App </title>"
                                      b'<link rel="icon" href="img/fav.png" sizes="32x32">', ""),
                           "/api": (200, "application/json", b"{}", ""),
+                          "/locked": (403, "text/html", b"<title>My App</title><p>Not allowed", ""),
                           "/gone": (404, "text/html", b"<title>Error response</title>", "")}
                 status, kind, body, location = routes[self.path]
                 self.send_response(status)
@@ -949,6 +960,8 @@ class OthersTest(unittest.TestCase):
         self.assertEqual(title, "My & App")
         self.assertEqual(len(digest), 16)
         self.assertEqual(icons, ["/img/fav.png", "/favicon.ico"])  # relative to the login page
+        App.start = "/locked"  # the app, turning us away: no digest to match it by
+        self.assertEqual(db.web_page("127.0.0.1", port), ("My App", None, ["/favicon.ico"]))
         for path in ("/api", "/gone"):  # not a page; an error page isn't the app
             with self.subTest(path=path):
                 App.start = path
