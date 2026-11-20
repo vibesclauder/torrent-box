@@ -19,6 +19,14 @@ from helpers import FakeServer, write_config
 import dashboard as db
 
 RUNNING = lambda unit: (db.OK, "running")  # noqa: E731
+STATUS_OTHERS = db.Status.other_services
+
+
+def setUpModule():
+    # the Status tests mustn't look for the test machine's own web services (OthersTest does)
+    patcher = mock.patch.object(db.Status, "other_services", lambda self, checks: [])
+    patcher.start()
+    unittest.addModuleCleanup(patcher.stop)
 
 
 def torrent(name, status, error=0, down=0, up=0, error_string=""):
@@ -846,6 +854,159 @@ class SystemTest(unittest.TestCase):
         self.assertIn('<div class="muted">Red · busy 34%</div>', first)
         self.assertIn("<b>–</b>", first)
         self.assertEqual(db.disk_io_html(db.result(db.OK, "a & b"), 0), "a &amp; b")  # no I/O
+
+
+class OthersTest(unittest.TestCase):
+    """Other services: the box's web services besides torrent-box's."""
+
+    def test_listening(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            head = "  sl  local_address rem_address   st\n"
+            Path(tmp, "tcp").write_text(head +
+                "   0: 00000000:1F90 00000000:0000 0A x\n"     # 0.0.0.0:8080, listening
+                "   1: 0100007F:1FA4 00000000:0000 0A x\n"     # 127.0.0.1:8100
+                "   2: 3201A8C0:2008 00000000:0000 0A x\n"     # 192.168.1.50:8200
+                "   3: 0100007F:0050 0200007F:D431 01 x\n")    # a connection, not listening
+            Path(tmp, "tcp6").write_text(head +
+                "   0: 00000000000000000000000000000000:15F3 00000000000000000000000000000000:0000 0A x\n"
+                "   1: 00000000000000000000000001000000:1F40 00000000000000000000000000000000:0000 0A x\n")
+            self.assertEqual(db.listening(Path(tmp)), {
+                ("0.0.0.0", 8080), ("127.0.0.1", 8100), ("192.168.1.50", 8200),
+                ("::", 5619), ("::1", 8000)})
+            self.assertEqual(db.listening(Path(tmp, "none")), set())
+
+    def test_one_entry_per_app_and_only_reachable_ones(self):
+        pages = {8100: ("Pantry", "aaa"), 8200: ("Pantry", "aaa"), 5173: ("Pantry", "bbb"),
+                 8000: ("Dev API", "ccc"), 9000: ("", "ddd"), 9091: ("Transmission", "eee")}
+        probed = []
+
+        def probe(address, port):
+            probed.append((address, port))
+            return pages.get(port)
+
+        sockets = {("127.0.0.1", 8100), ("192.168.1.50", 8200), ("127.0.0.1", 5173),
+                   ("127.0.0.1", 8000), ("::", 9000), ("0.0.0.0", 9091), ("0.0.0.0", 22),
+                   ("100.101.102.103", 18100), ("fe80::1", 5357), ("0.0.0.0", 7000)}
+        https = {8100: ["https://box.ts.net:18100/", "https://pantry.ts.net/"],
+                 5173: ["https://box.ts.net:8443/"]}
+        found = db.other_services({9091}, sockets, https, probe)
+        self.assertEqual(found, [
+            {"name": "Pantry", "ports": [5173], "lan": {}, "https": ["https://box.ts.net:8443/"]},
+            {"name": "Pantry", "ports": [8100, 8200], "lan": {"8200": "192.168.1.50"},
+             "https": ["https://pantry.ts.net/", "https://box.ts.net:18100/"]},
+            {"name": "Port 9000", "ports": [9000], "lan": {"9000": ""}, "https": []},
+        ])
+        ports = {port for _, port in probed}
+        self.assertNotIn(8000, ports)   # on 127.0.0.1 alone, not served on the tailnet
+        self.assertNotIn(9091, ports)   # a tile's
+        self.assertNotIn(22, ports)     # never a web page
+        self.assertNotIn(18100, ports)  # tailscaled's own
+        self.assertNotIn(5357, ports)   # link-local
+        self.assertIn(("127.0.0.1", 9000), probed)  # on all addresses: tried on this box
+
+    def test_web_page(self):
+        class App(BaseHTTPRequestHandler):
+            server_version = "App"
+            start = "/login"  # where / sends the browser
+
+            def log_message(self, *args):
+                pass
+
+            def do_GET(self):
+                routes = {"/": (302, "", b"", self.start),
+                          "/login": (200, "text/html", b"<html><TITLE>\n My &amp; App </title>", ""),
+                          "/api": (200, "application/json", b"{}", ""),
+                          "/gone": (404, "text/html", b"<title>Error response</title>", "")}
+                status, kind, body, location = routes[self.path]
+                self.send_response(status)
+                if kind:
+                    self.send_header("Content-Type", kind)
+                if location:
+                    self.send_header("Location", location)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        httpd = ThreadingHTTPServer(("127.0.0.1", 0), App)
+        threading.Thread(target=httpd.serve_forever, args=(0.01,), daemon=True).start()
+        self.addCleanup(httpd.server_close)
+        self.addCleanup(httpd.shutdown)
+        port = httpd.server_address[1]
+        title, digest = db.web_page("127.0.0.1", port)
+        self.assertEqual(title, "My & App")
+        self.assertEqual(len(digest), 16)
+        for path in ("/api", "/gone"):  # not a page; an error page isn't the app
+            with self.subTest(path=path):
+                App.start = path
+                self.assertIsNone(db.web_page("127.0.0.1", port))
+        self.assertIsNone(db.web_page("127.0.0.1", 1))  # nothing there
+
+        App.server_version = db.Handler.server_version  # this page itself
+        self.assertIsNone(db.web_page("127.0.0.1", port))
+
+    def test_tailscale_https(self):
+        serving = {"Web": {"box.ts.net:18100": {"Handlers": {"/": {"Proxy": "http://127.0.0.1:8100"}}},
+                           "box.ts.net:443": {"Handlers": {"/": {"Proxy": "http://127.0.0.1:80"}}},
+                           "box.ts.net:9443": {"Handlers": {"/": {"Path": "/srv"}}}},
+                   "Services": {"svc:pantry": {"Web": {"pantry.ts.net:443": {
+                       "Handlers": {"/": {"Proxy": "http://localhost:8100/"}}}}}}}
+        done = mock.Mock(stdout=json.dumps(serving))
+        with mock.patch.object(db.subprocess, "run", return_value=done):
+            self.assertEqual(db.tailscale_https(), {
+                8100: ["https://pantry.ts.net/", "https://box.ts.net:18100/"],
+                80: ["https://box.ts.net/"]})
+        with mock.patch.object(db.subprocess, "run", side_effect=FileNotFoundError):
+            self.assertEqual(db.tailscale_https(), {})
+
+    def test_known_ports(self):
+        checks = {"transmission": {}, "seerr": {}, "ntfy": {"server": "http://localhost:2586"},
+                  "storage": {}}
+        self.assertEqual(db.known_ports(checks), {9091, 5055, 2586})
+
+    def test_links(self):
+        pantry = {"name": "Pantry", "ports": [8100, 8200], "lan": {"8200": "192.168.1.50"},
+                 "https": ["https://pantry.ts.net/", "https://box.ts.net:18100/"]}
+        everywhere = {"name": "X", "ports": [8200, 9000], "lan": {"8200": "192.168.1.50", "9000": ""},
+                      "https": []}
+        tailnet_only = {"name": "Dev", "ports": [5173], "lan": {}, "https": ["https://box.ts.net:8443/"]}
+        self.assertEqual(db.other_url(pantry, "box.lan"), "http://192.168.1.50:8200/")
+        self.assertEqual(db.other_url(pantry, "box.ts.net", https=True), "https://pantry.ts.net/")
+        self.assertEqual(db.other_url(everywhere, "box.lan"), "http://box.lan:9000/")
+        self.assertEqual(db.other_url(everywhere, "[fd7a::1]"), "http://[fd7a::1]:9000/")
+        self.assertEqual(db.other_url(tailnet_only, "box.lan"), "https://box.ts.net:8443/")
+        self.assertEqual(db.other_where(pantry), "ports 8100, 8200 · pantry · tailnet :18100")
+        self.assertEqual(db.other_where(tailnet_only), "port 5173 · tailnet :8443")
+
+    def test_render(self):
+        others = [{"name": "<Pantry>", "ports": [8200], "lan": {"8200": ""}, "https": []}]
+        page = db.render({**PageTest.STATUS, "others": others}, "box.lan")
+        self.assertIn("<h2>Other services</h2>", page)
+        self.assertIn('href="http://box.lan:8200/"', page)
+        self.assertIn("&lt;Pantry&gt;", page)
+        self.assertNotIn("Other services", db.render(PageTest.STATUS, "box.lan"))
+
+    def test_status_looks_in_the_background(self):
+        status = db.Status(Path("/nonexistent/config.ini"), Path("/nonexistent"))
+        calls = []
+        release = threading.Event()
+
+        def slow(skip):
+            calls.append(skip)
+            release.wait(5)
+            return [{"name": f"look {len(calls)}"}]
+
+        with mock.patch.object(db, "other_services", slow), mock.patch.object(db, "OTHERS_WAIT", 0.05):
+            self.assertEqual(STATUS_OTHERS(status, {"seerr": {}}), [])  # the first look is slow
+            self.assertEqual(calls, [{5055}])
+            release.set()
+            status.others_job.result()
+            self.assertEqual(STATUS_OTHERS(status, {}), [{"name": "look 1"}])
+            self.assertEqual(len(calls), 1)  # not again before OTHERS_EVERY
+            status.others_at -= db.OTHERS_EVERY + 1
+            STATUS_OTHERS(status, {})
+            status.others_job.result()
+            self.assertEqual(STATUS_OTHERS(status, {}), [{"name": "look 2"}])
+        status.pool.shutdown()
 
 
 class PageTest(unittest.TestCase):

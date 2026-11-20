@@ -101,7 +101,11 @@ in groups: **Watch** (Jellyfin or minidlna), **Request** (Seerr, Desireerr), **D
 configured them they rarely need you, so they're one folded line, which says when one of them
 has a problem; opened, it stays open on that browser). Each app has its own logo (taken from
 the app itself, so nothing is copied into this repo), a dot for whether it's healthy, and
-its version (Transmission: its speeds, or idle), or what's wrong. Below
+its version (Transmission: its speeds, or idle), or what's wrong. **Other services** lists
+the box's other web pages, found by themselves (every minute): whatever listens on a TCP port
+and answers with an HTML page, named by its title, apart from torrent-box's own. An app on
+several ports is one entry; one only on 127.0.0.1 is listed when `tailscale serve` gives it an
+HTTPS address. Over HTTPS the link is its tailnet address, else its port on the LAN. Below
 the apps: the storage disk (free space), the nCore feed (rss2transmission's last run), the
 Samba share, Tailscale and the box itself: uptime and CPU temperature, and meters for CPU
 use (with the load), memory (apps, and the cache the kernel gives back when they need it)

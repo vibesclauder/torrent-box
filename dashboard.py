@@ -21,8 +21,10 @@ import collections
 import configparser
 import errno
 import functools
+import hashlib
 import html
 import http.client
+import ipaddress
 import json
 import os
 import re
@@ -138,6 +140,16 @@ LOGOS = {
 LOGO_TYPES = {".svg": "image/svg+xml", ".png": "image/png"}
 LOGO_MAX = 512 * 1024
 LOGO_RETRY = 60  # seconds before trying again to get a logo that wasn't there
+# The box's other web services, found by themselves: whatever listens on TCP and answers with
+# an HTML page, apart from the tiles' apps, ntfy and this page. Listed under "Other services".
+OTHERS_EVERY = 60  # seconds between looks
+OTHERS_WAIT = 4  # the first look may hold up the page this long; later ones never do
+OTHERS_TIMEOUT = 2  # per port
+OTHERS_READ = 64 * 1024  # of a page, enough for its <title>
+NOT_WEB = {22, 25, 53, 111, 139, 445, 631}  # well-known ports that are never a web page
+DOCKER_NET = ipaddress.ip_network("172.16.0.0/12")
+# tailscaled's own listeners (it serves the apps' HTTPS ports there): not services of their own
+TAILNET_NETS = [ipaddress.ip_network("100.64.0.0/10"), ipaddress.ip_network("fd7a:115c:a1e0::/48")]
 
 
 ### Settings
@@ -761,6 +773,145 @@ def tailscale_services(me):
                 if name in approved:
                     links[m[1]] = host
     return {"approved": sorted(approved), "served": served, "links": links}
+
+
+### Other web services
+
+def listening(proc=Path("/proc/net")):
+    """The box's listening TCP sockets: {(address, port)}, from /proc (no root needed)."""
+    found = set()
+    for name in ("tcp", "tcp6"):
+        try:
+            lines = (proc / name).read_text().splitlines()[1:]
+        except OSError:
+            continue
+        for line in lines:
+            fields = line.split()
+            if len(fields) < 4 or fields[3] != "0A":  # LISTEN
+                continue
+            addr, _, port = fields[1].partition(":")
+            raw = bytes.fromhex(addr)
+            # the kernel prints each 32-bit word in host (little-endian) order
+            raw = b"".join(raw[i:i + 4][::-1] for i in range(0, len(raw), 4))
+            found.add((str(ipaddress.ip_address(raw)), int(port, 16)))
+    return found
+
+
+def tailscale_https():
+    """What `tailscale serve` gives an HTTPS address: {local port: [https URLs]}, the apps'
+    own names (Tailscale Services) first."""
+    try:
+        serving = json.loads(subprocess.run(["tailscale", "serve", "status", "--json"],
+                                            capture_output=True, text=True, timeout=TIMEOUT).stdout)
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return {}
+    webs = [((conf or {}).get("Web") or {}) for conf in ((serving or {}).get("Services") or {}).values()]
+    webs.append((serving or {}).get("Web") or {})
+    urls = {}
+    for web in webs:
+        for hostport, conf in web.items():
+            host, _, port = hostport.rpartition(":")
+            target = ((conf or {}).get("Handlers") or {}).get("/", {}).get("Proxy") or ""
+            m = re.fullmatch(r"http://(?:127\.0\.0\.1|localhost):(\d+)/?", target)
+            if m:
+                urls.setdefault(int(m[1]), []).append(
+                    f"https://{host}/" if port == "443" else f"https://{host}:{port}/")
+    return urls
+
+
+TITLE = re.compile(rb"<title[^>]*>(.*?)</title", re.I | re.S)
+
+
+def web_page(address, port, timeout=OTHERS_TIMEOUT):
+    """What answers at address:port, if it's a web page: (its title, a digest of the page, to
+    tell one app on two ports from two apps), else None. Follows one redirect on the same
+    server (a login page, say). This page itself is None."""
+    path = "/"
+    for _ in range(2):
+        conn = http.client.HTTPConnection(address, port, timeout=timeout)
+        try:
+            conn.request("GET", path, headers={"Host": f"localhost:{port}", "Accept": "text/html"})
+            resp = conn.getresponse()
+            if (resp.getheader("Server") or "").startswith(Handler.server_version):
+                return None
+            location = resp.getheader("Location") or ""
+            if resp.status in (301, 302, 303, 307, 308) and location.startswith("/") \
+                    and not location.startswith("//") and path == "/":
+                path = location
+                continue
+            if resp.status >= 400 or "html" not in (resp.getheader("Content-Type") or ""):
+                return None  # an error page isn't the app
+            body = resp.read(OTHERS_READ)
+        except (OSError, http.client.HTTPException, ValueError):
+            return None
+        finally:
+            conn.close()
+        m = TITLE.search(body)
+        title = html.unescape(m[1].decode("utf-8", "replace")).strip() if m else ""
+        return " ".join(title.split())[:80], hashlib.sha256(body).hexdigest()[:16]
+    return None
+
+
+def other_services(skip=(), sockets=None, https=None, probe=web_page):
+    """The box's web services besides ours (skip: their ports), one per app however many ports
+    it has: [{"name", "ports", "lan": ports any device on the LAN reaches ({port: address}, ""
+    for all of the box's addresses), "https": its addresses on the tailnet}], by name. Only
+    those a viewer can reach: a service on 127.0.0.1 alone needs `tailscale serve`."""
+    sockets = listening() if sockets is None else sockets
+    https = tailscale_https() if https is None else https
+    binds = {}
+    for address, port in sockets:
+        ip = ipaddress.ip_address(address)
+        if port in NOT_WEB or port in skip or ip.is_link_local \
+                or any(ip in net for net in TAILNET_NETS):
+            continue
+        binds.setdefault(port, set()).add(address)
+    targets = {}
+    for port, addresses in binds.items():
+        anywhere = addresses & {"0.0.0.0", "::"}
+        local = [a for a in addresses if ipaddress.ip_address(a).is_loopback]
+        # one address: the LAN's rather than a Docker bridge's (172.16.0.0/12)
+        others = sorted(addresses - anywhere - set(local),
+                        key=lambda a: (ipaddress.ip_address(a) in DOCKER_NET, a))
+        lan = "" if anywhere else (others[0] if others else None)
+        if lan is None and port not in https:
+            continue  # only on this box
+        reach = (["127.0.0.1", "::1"] if anywhere else []) + local + others
+        targets[port] = (lan, reach)
+
+    def look(port):
+        for address in targets[port][1]:
+            if (page := probe(address, port)) is not None:
+                return port, page
+        return port, None
+
+    found = {}
+    if targets:
+        with ThreadPoolExecutor(max_workers=min(16, len(targets))) as pool:
+            for port, page in pool.map(look, sorted(targets)):
+                if page is None:
+                    continue
+                title, digest = page
+                entry = found.setdefault(digest, {"name": title or f"Port {port}", "ports": [],
+                                                  "lan": {}, "https": []})
+                entry["ports"].append(port)
+                if targets[port][0] is not None:
+                    entry["lan"][str(port)] = targets[port][0]
+                entry["https"] += https.get(port, [])
+    for entry in found.values():  # a service's own name (no port) first
+        entry["https"].sort(key=lambda url: (url.count(":") > 1, url))
+    return sorted(found.values(), key=lambda e: (e["name"].casefold(), e["ports"]))
+
+
+def known_ports(checks):
+    """The ports of what the page shows already: the tiles' apps and our ntfy server."""
+    ports = {port for cid, _, _, port in TILES if cid in checks}
+    if server := (checks.get("ntfy") or {}).get("server"):
+        try:
+            ports.add(urllib.parse.urlsplit(server).port or 80)
+        except ValueError:
+            pass
+    return ports
 
 
 def disk_usage(path):
@@ -1471,6 +1622,9 @@ color:var(--muted);margin:0;white-space:nowrap}
 .wrong svg{width:16px;height:16px}
 .folded .apps{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:2px 10px;
 padding:6px 10px 10px;border-top:1px solid var(--line)}
+.others{background:var(--card);border:1px solid var(--line);border-radius:14px;box-shadow:var(--shadow)}
+.others .apps{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:2px 10px;padding:6px 10px}
+.badge.other{background:linear-gradient(135deg,#64748b,#334155)}
 .app{display:flex;gap:10px;align-items:center;padding:8px;border-radius:10px;color:inherit;text-decoration:none}
 .app:hover{background:var(--soft)}
 .app>div{flex:1;min-width:0;font-size:14px}.app .line{font-size:12px}
@@ -1566,7 +1720,7 @@ flex-wrap:wrap;gap:6px}
 .groups{grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
 .grp{grid-column:span 1;order:2}.grp.wide{grid-column:span 2}
 .g-watch{order:0}.g-download{order:1}
-.why{display:none}.folded .apps{grid-template-columns:1fr}}
+.why{display:none}.folded .apps,.others .apps{grid-template-columns:1fr}}
 """ % BRAND
 
 
@@ -1850,6 +2004,48 @@ def tile_html(cid, status, https, tailnet):
             f'<span class="dot {c["state"]}" title="{c["state"]}"></span></span></div>'
             f'<div class="muted">{purpose}</div><div class="line" title="{e(tile_title(c))}">'
             f'{e(tile_line(c))}</div></div></a>')
+
+
+OTHER_ICON = ('<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.5 2.7 3.8 5.7 3.8 9s-1.3 6.3-3.8 9'
+              'M12 3c-2.5 2.7-3.8 5.7-3.8 9s1.3 6.3 3.8 9"/>')
+
+
+def other_url(entry, host, https=False):
+    """Where the viewer opens another service: over HTTPS (on the tailnet) its tailnet address
+    if it has one; else a port on the LAN (on the host the page was opened with, or the one
+    address it listens on); else its tailnet address all the same."""
+    lan = [(int(port), addr) for port, addr in entry["lan"].items()]
+    lan.sort(key=lambda pa: (pa[1] != "", pa[0]))  # on all addresses first
+    by_lan = [f"http://{html.escape(addr or host)}:{port}/" if ":" not in (addr or host)
+              else f"http://[{html.escape((addr or host).strip('[]'))}]:{port}/" for port, addr in lan]
+    order = entry["https"] + by_lan if https else by_lan + entry["https"]
+    return order[0] if order else ""
+
+
+def other_where(entry):
+    """A service's addresses, short: "port 8200 · pantry", the tailnet ones by name."""
+    names = []
+    for url in entry["https"]:
+        netloc = urllib.parse.urlsplit(url).netloc
+        name, _, port = netloc.partition(":")
+        names.append(f"tailnet :{port}" if port else name.split(".")[0])
+    ports = ", ".join(str(p) for p in entry["ports"])
+    return " · ".join([f"port{'s' if len(entry['ports']) > 1 else ''} {ports}"] + names)
+
+
+def others_html(status, host, https):
+    """Other services: the box's web services that aren't torrent-box's (other_services)."""
+    e = html.escape
+    apps = []
+    for entry in status.get("others") or ():
+        if not (url := other_url(entry, host, https)):
+            continue
+        apps.append(f'<a class="app" href="{url}"><span class="badge other">'
+                    f'{glyph(OTHER_ICON, "#fff")}</span><div><b>{e(entry["name"])}</b>'
+                    f'<div class="line muted" title="{e(other_where(entry))}">{e(other_where(entry))}</div></div></a>')
+    if not apps:
+        return ""
+    return f'<h2>Other services</h2><div class="others"><div class="apps">{"".join(apps)}</div></div>'
 
 
 def folded_html(status, https, tailnet):
@@ -2144,6 +2340,7 @@ def render(status, host, https=False):
 {services_note(checks, https)}
 <div class="groups{" many" if main_count > 4 else ""}" style="--cols:{max(main_count, 3)}">{"".join(groups)}</div>
 {folded}
+{others_html(status, host, https)}
 <h2>Health</h2>
 <div class="rows">{"".join(rows)}</div>
 <footer><span id="updated">Updated {updated}, refreshes every {REFRESH_SECONDS} s.</span>
@@ -2243,6 +2440,7 @@ class Status:
         self.tries = []  # times of recent 2FA logins
         self.last_login = None  # {"time", "ok", "message"}: shown on the page for a while
         self.logos = Logos()
+        self.others, self.others_job, self.others_at = None, None, 0.0
 
     def get(self):
         with self.lock:
@@ -2251,9 +2449,26 @@ class Status:
                                 self.last_login)
                 latest["logos"] = self.logos.available(
                     [cid for cid, *_ in TILES if cid in latest["checks"]], self.pool)
+                latest["others"] = self.other_services(latest["checks"])
                 self.latest, self.at = latest, time.monotonic()
             self.latest["update"] = self.updates.info
             return self.latest
+
+    def other_services(self, checks):
+        """other_services(), looked for every OTHERS_EVERY in the background: the last ones
+        found (the first time, waiting up to OTHERS_WAIT)."""
+        job = self.others_job
+        if job is None or (job.done() and time.monotonic() - self.others_at > OTHERS_EVERY):
+            job = self.others_job = self.pool.submit(other_services, known_ports(checks))
+            self.others_at = time.monotonic()
+        if job.done() or self.others is None:
+            try:
+                self.others = job.result(timeout=OTHERS_WAIT)
+            except Exception as e:  # TimeoutError: the next request has them
+                if not isinstance(e, TimeoutError):
+                    print(f"other services: {e!r}", file=sys.stderr, flush=True)
+                self.others = self.others or []
+        return self.others
 
     def watch(self):
         """Forever: push what stays wrong (and when it's fine again)."""
