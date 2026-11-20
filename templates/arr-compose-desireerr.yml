@@ -7,7 +7,7 @@
 # .nfo files beside them, so it sees the storage disk at Whisparr's path, and reads Whisparr's
 # API key from its config folder.
   desireerr:
-    build:
+    build:  # built by setup.sh and arr-update with docker build, the same way each time
       context: @DESIREERR_SOURCE@
     image: torrent-box/desireerr
     container_name: desireerr

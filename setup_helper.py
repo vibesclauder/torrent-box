@@ -1419,6 +1419,21 @@ def checkout_version(path, run=subprocess.run):
     return (commit or "?") + ("+" if dirty else "")
 
 
+def desireerr_build_command(docker, source, run=subprocess.run):
+    """docker build for Desireerr's image, as setup.sh and arr-update build it: without buildx's
+    provenance (new on every build), so the same source makes the same image."""
+    cmd = docker + ["build", "-q", "-t", DESIREERR_IMAGE]
+    if run(docker + ["buildx", "version"], capture_output=True).returncode == 0:
+        cmd.append("--provenance=false")
+    return cmd + [str(source)]
+
+
+def compose_context(compose_text):
+    """The build context in compose.yml (Desireerr's repo), or ""."""
+    m = re.search(r"^\s*context:\s*(\S+)", compose_text, re.M)
+    return m[1] if m else ""
+
+
 def docker_command():
     """docker, through sudo unless you may use its socket (the docker group)."""
     return ["docker"] if os.access("/var/run/docker.sock", os.W_OK) else ["sudo", "docker"]
@@ -1450,13 +1465,16 @@ def cmd_desireerr(mode, checkout=None, arr_dir=ARR_DIR, run=subprocess.run, out=
             return 1
     if mode == "local":
         version = checkout_version(checkout, run)
-        run(docker + ["build", "-q", "-t", DESIREERR_IMAGE, str(checkout)], check=True)
+        run(desireerr_build_command(docker, checkout, run), check=True)
         write_env(env_file, DESIREERR_BUILD=f"local:{version}", DESIREERR_CODE=None)
     elif mode == "dev":
         write_env(env_file, DESIREERR_CODE=str(checkout), DESIREERR_BUILD=None)
     else:
         write_env(env_file, DESIREERR_BUILD=None, DESIREERR_CODE=None)
-        run(compose + ["build", "-q", "desireerr"], check=True)
+        if not (source := compose_context(compose_text)):
+            out(f"no build context for Desireerr in {compose_file}; run setup.sh")
+            return 1
+        run(desireerr_build_command(docker, source, run), check=True)
     run(compose + ["up", "-d", "desireerr"], check=True)
     if mode == "local":
         out(f"Desireerr: your checkout at {version}; weekly updates skip it until "

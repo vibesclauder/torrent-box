@@ -1356,7 +1356,9 @@ esac
         (tmp / "docker").write_text(f"""#!/bin/bash
 case "$*" in
   *"config --services") cat {tmp}/services ;;
-  *"build --quiet --pull desireerr") echo "$*" >>{tmp}/calls; [[ ! -f {tmp}/build-fails ]] ;;
+  "buildx version") ;;
+  "build -q -t torrent-box/desireerr --provenance=false --pull https://x/desireerr.git#main")
+    echo "$*" >>{tmp}/calls; [[ ! -f {tmp}/build-fails ]] ;;
   *"pull --quiet"*) echo "$*" >>{tmp}/calls; [[ -z $PULL_FAILS ]] ;;
   *"up -d"*) echo "$*" >>{tmp}/calls; [[ ! -f {tmp}/pulled ]] || cp {tmp}/pulled {tmp}/images ;;
   inspect*) grep "^${{@: -1}}=" {tmp}/images | cut -d= -f2 ;;
@@ -1411,6 +1413,8 @@ esac
         tmp = Path(self.tmpdir.name)
         (tmp / "services").write_text("sonarr\nradarr\ndesireerr\n")
         (tmp / "images").write_text("sonarr=sha256:a\nradarr=sha256:b\ndesireerr=sha256:c\n")
+        (tmp / "compose.yml").write_text("services:\n  desireerr:\n    build:  # by docker build\n"
+                                         "      context: https://x/desireerr.git#main\n")
         return tmp
 
     def test_desireerr_built_again(self):
@@ -1419,7 +1423,8 @@ esac
         result, pushes = self.run_update()
         self.assertEqual(result.returncode, 0, result.stderr)
         calls = self.calls()
-        self.assertTrue(calls[0].endswith("build --quiet --pull desireerr"), calls)
+        self.assertEqual(calls[0], "build -q -t torrent-box/desireerr --provenance=false --pull "
+                                   "https://x/desireerr.git#main")  # the same build each time
         self.assertIn("pull --quiet --ignore-buildable sonarr radarr desireerr", calls[1])
         self.assertEqual(pushes, "Apps updated|New versions running: desireerr\n")
 
@@ -1572,7 +1577,8 @@ class DesireerrSwitchTest(unittest.TestCase):
         self.addCleanup(self.tmpdir.cleanup)
         self.arr = Path(self.tmpdir.name) / "arr"
         self.arr.mkdir()
-        (self.arr / "compose.yml").write_text("services:\n  whisparr:\n    image: x\n  desireerr:\n    build: y\n")
+        (self.arr / "compose.yml").write_text("services:\n  whisparr:\n    image: x\n  desireerr:\n"
+                                              "    build:\n      context: https://x/d.git#main\n")
         self.checkout = Path(self.tmpdir.name) / "desireerr"
         self.checkout.mkdir()
         for name in ("desireerr.py", "Dockerfile"):
@@ -1609,7 +1615,8 @@ class DesireerrSwitchTest(unittest.TestCase):
 
     def test_local(self):
         self.assertEqual(self.switch("local", self.checkout), 0)
-        self.assertIn(["docker", "build", "-q", "-t", "torrent-box/desireerr", str(self.checkout)], self.calls)
+        self.assertIn(["docker", "build", "-q", "-t", "torrent-box/desireerr", "--provenance=false",
+                       str(self.checkout)], self.calls)
         self.assertEqual(self.calls[-1][-3:], ["up", "-d", "desireerr"])
         self.assertEqual(self.env(), "DESIREERR_BUILD=local:26c5293+\n")  # + : changes not committed
         self.assertIn("weekly updates skip it", self.said[-1])
@@ -1619,13 +1626,16 @@ class DesireerrSwitchTest(unittest.TestCase):
     def test_dev_then_back_to_github(self):
         self.assertEqual(self.switch("dev", self.checkout), 0)
         self.assertEqual(self.env(), f"DESIREERR_CODE={self.checkout}\n")
-        self.assertFalse(any("build" in c for c in self.calls))  # the code as it is: no build
+        self.assertFalse(any(c[1] == "build" for c in self.calls))  # the code as it is: no build
         self.assertIn("docker restart desireerr", self.said[-1])
         self.calls.clear()
         self.assertEqual(self.switch("github"), 0)
         self.assertEqual(self.env(), "")
         compose = ["docker", "compose", "-f", str(self.arr / "compose.yml")]
-        self.assertEqual(self.calls, [compose + ["build", "-q", "desireerr"], compose + ["up", "-d", "desireerr"]])
+        self.assertEqual(self.calls, [["docker", "buildx", "version"],
+                                      ["docker", "build", "-q", "-t", "torrent-box/desireerr",
+                                       "--provenance=false", "https://x/d.git#main"],
+                                      compose + ["up", "-d", "desireerr"]])
 
     def test_refusals(self):
         self.assertEqual(self.switch("local", self.tmpdir.name), 1)  # not a checkout
@@ -1636,3 +1646,8 @@ class DesireerrSwitchTest(unittest.TestCase):
         (self.arr / "compose.yml").write_text("services:\n  whisparr:\n    image: x\n")
         self.assertEqual(self.switch("status"), 1)
         self.assertIn("isn't in", self.said[-1])
+
+    def test_build_command_without_buildx(self):
+        no_buildx = lambda cmd, **kw: subprocess.CompletedProcess(cmd, 1, b"", b"")  # noqa: E731
+        self.assertEqual(sh.desireerr_build_command(["docker"], "/src", no_buildx),
+                         ["docker", "build", "-q", "-t", "torrent-box/desireerr", "/src"])

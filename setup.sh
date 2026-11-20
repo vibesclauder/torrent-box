@@ -2021,12 +2021,16 @@ desireerr_image() {
         info "Desireerr: a build of your checkout runs, not rebuilt (./setup_helper.py desireerr github: back)"
         return 0
     fi
+    # The same build as arr-update's and setup_helper.py's: buildx's provenance (on by default)
+    # is new on every build, and the image with it, so every build would be a "new" image.
+    DESIREERR_BUILD_FLAGS=(-q -t "$DESIREERR_IMAGE")
+    if docker buildx version >/dev/null 2>&1; then DESIREERR_BUILD_FLAGS+=(--provenance=false); fi
     if (( DRY_RUN )); then
-        info "would run: sudo docker build -q -t $DESIREERR_IMAGE $DESIREERR_SOURCE"
+        info "would run: sudo docker build ${DESIREERR_BUILD_FLAGS[*]} $DESIREERR_SOURCE"
         return 0
     fi
     before=$(sudo docker image inspect -f '{{.Id}}' "$DESIREERR_IMAGE" 2>/dev/null || true)
-    if sudo docker build -q -t "$DESIREERR_IMAGE" "$DESIREERR_SOURCE" >/dev/null; then
+    if sudo docker build "${DESIREERR_BUILD_FLAGS[@]}" "$DESIREERR_SOURCE" >/dev/null; then
         after=$(sudo docker image inspect -f '{{.Id}}' "$DESIREERR_IMAGE" 2>/dev/null || true)
         if [[ $after != "$before" ]]; then
             info "Desireerr: image built from $DESIREERR_SOURCE"
