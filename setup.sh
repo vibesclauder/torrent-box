@@ -44,6 +44,8 @@ DASHBOARD_ICONS=/usr/local/share/torrent-box/icons  # dashboard.WEBAPP_ICON_DIRS
 INSTALLED=/usr/local/share/torrent-box/installed.json  # dashboard.INSTALLED_FILE
 DESIREERR_REPO=https://github.com/vibesclauder/desireerr.git  # requests for StashDB scenes (public)
 DESIREERR_SOURCE=$DESIREERR_REPO#main  # its image is built from there (arr-compose-desireerr.yml)
+DESIREERR_IMAGE=torrent-box/desireerr  # setup_helper.DESIREERR_IMAGE
+DESIREERR_UP=0  # its container is in compose.yml this run (setup_arr)
 DESIREERR_PORT=5056
 DESIREERR_DATA=$ARR_DIR/desireerr/data  # its settings, users and requests (its container's /data)
 # Before it ran in Docker, Desireerr was a user unit with these (moved to $ARR_DIR/desireerr)
@@ -1823,15 +1825,18 @@ setup_arr() {
     done
     # Whisparr: its service appended; switched off, the next "up --remove-orphans" removes it
     # (its config stays in $ARR_DIR/whisparr)
+    # Desireerr's container only once it has an image (a box moving over keeps its user unit
+    # until then)
+    if desireerr_on && desireerr_image; then DESIREERR_UP=1; fi
     { cat "$REPO/templates/arr-compose.yml"
       [[ $whisparr != yes ]] || cat "$REPO/templates/arr-compose-whisparr.yml"
-      ! desireerr_on || cat "$REPO/templates/arr-compose-desireerr.yml"
+      (( ! DESIREERR_UP )) || cat "$REPO/templates/arr-compose-desireerr.yml"
     } >"$TMP/compose.template"
     helper render "$TMP/compose.template" "PUID=$(id -u)" "PGID=${pgid:-107}" \
         "TZ=${tz:-Etc/UTC}" "ARR_DIR=$ARR_DIR" "STORAGE_ROOT=$storage_root" \
         "DESIREERR_SOURCE=$DESIREERR_SOURCE" >"$TMP/compose.yml"
     update_file "$TMP/compose.yml" "$ARR_DIR/compose.yml" 644 || true
-    ! desireerr_on || desireerr_prepare
+    (( ! DESIREERR_UP )) || desireerr_move_over
     # Pulls missing images and (re)creates only the containers whose definition changed.
     # Newer images are not pulled here; see the README for updating.
     as_root docker compose -f "$ARR_DIR/compose.yml" up -d --remove-orphans
@@ -2002,33 +2007,65 @@ desireerr_unit_gone() {
     [[ -f $USER_UNITS/desireerr.service ]] || return 0
     run systemctl --user disable --now desireerr.service
     run rm -f "$USER_UNITS/desireerr.service" "$USER_UNITS/desireerr.service.d/torrent-box.conf"
+    if (( ! DRY_RUN )); then rmdir "$USER_UNITS/desireerr.service.d" 2>/dev/null || true; fi
     run systemctl --user daemon-reload
 }
 
-# Before its container starts (setup_arr): the unit gone, its data moved, its folders there,
-# and its image built from $DESIREERR_SOURCE: cached, so only a new commit makes a new one,
-# and the next "up" recreates the container with it. Not while a build of your checkout runs.
-desireerr_prepare() {
-    local dir
+# Desireerr's image, built from $DESIREERR_SOURCE (cached: only a new commit makes a new one,
+# and the "up" after it recreates the container), unless a build of your checkout runs. Fails
+# when it has none at all, so nothing is taken down for a container that can't start.
+desireerr_image() {
+    local before after
+    if grep -q '^DESIREERR_BUILD=local:' "$ARR_DIR/.env" 2>/dev/null &&  # (no password asked here)
+            { docker image inspect "$DESIREERR_IMAGE" || sudo -n docker image inspect "$DESIREERR_IMAGE"; } >/dev/null 2>&1; then
+        info "Desireerr: a build of your checkout runs, not rebuilt (./setup_helper.py desireerr github: back)"
+        return 0
+    fi
+    if (( DRY_RUN )); then
+        info "would run: sudo docker build -q -t $DESIREERR_IMAGE $DESIREERR_SOURCE"
+        return 0
+    fi
+    before=$(sudo docker image inspect -f '{{.Id}}' "$DESIREERR_IMAGE" 2>/dev/null || true)
+    if sudo docker build -q -t "$DESIREERR_IMAGE" "$DESIREERR_SOURCE" >/dev/null; then
+        after=$(sudo docker image inspect -f '{{.Id}}' "$DESIREERR_IMAGE" 2>/dev/null || true)
+        if [[ $after != "$before" ]]; then
+            info "Desireerr: image built from $DESIREERR_SOURCE"
+            changed "Desireerr: a new image built from $DESIREERR_SOURCE"
+        fi
+        return 0
+    fi
+    if [[ -n $before ]]; then
+        warn "couldn't build Desireerr's image from $DESIREERR_SOURCE; it keeps the one it has"
+        return 0
+    fi
+    warn "couldn't build Desireerr's image from $DESIREERR_SOURCE; it stays as it is until a setup run can"
+    return 1
+}
+
+# Before its container starts (setup_arr): a box that ran it as a user unit has that stopped
+# and removed, and its data and covers moved; and its folders are there.
+desireerr_move_over() {
+    local dir moved=()
     if [[ -f $USER_UNITS/desireerr.service ]]; then
         info "Desireerr: from its user unit to a container"
         desireerr_unit_gone
     fi
-    if [[ -d $OLD_DESIREERR_DATA && ! -e $DESIREERR_DATA ]]; then
+    if [[ -d $OLD_DESIREERR_DATA || -d $OLD_DESIREERR_CACHE ]]; then
         [[ -d $ARR_DIR/desireerr ]] || run mkdir -p "$ARR_DIR/desireerr"
+    fi
+    if [[ -d $OLD_DESIREERR_DATA && ! -e $DESIREERR_DATA ]]; then
         run mv "$OLD_DESIREERR_DATA" "$DESIREERR_DATA"
-        if [[ -d $OLD_DESIREERR_CACHE && ! -e $ARR_DIR/desireerr/cache ]]; then
-            run mv "$OLD_DESIREERR_CACHE" "$ARR_DIR/desireerr/cache"
-        fi
+        moved+=(data)
+    elif [[ -d $OLD_DESIREERR_DATA ]]; then
+        warn "Desireerr runs on $DESIREERR_DATA; the older $OLD_DESIREERR_DATA is left as it is"
+    fi
+    if [[ -d $OLD_DESIREERR_CACHE && ! -e $ARR_DIR/desireerr/cache ]]; then
+        run mv "$OLD_DESIREERR_CACHE" "$ARR_DIR/desireerr/cache"
+        moved+=(cache)
     fi
     for dir in data cache no-code; do
-        [[ -d $ARR_DIR/desireerr/$dir ]] || run mkdir -p "$ARR_DIR/desireerr/$dir"
+        [[ -d $ARR_DIR/desireerr/$dir || " ${moved[*]} " == *" $dir "* ]] || run mkdir -p "$ARR_DIR/desireerr/$dir"
     done
-    if grep -q '^DESIREERR_BUILD=local:' "$ARR_DIR/.env" 2>/dev/null; then
-        info "Desireerr: a build of your checkout runs, not rebuilt (./setup_helper.py desireerr github: back)"
-    elif ! as_root docker compose -f "$ARR_DIR/compose.yml" build -q desireerr; then
-        warn "couldn't build Desireerr's image from $DESIREERR_SOURCE; it keeps the one it has"
-    fi
 }
 
 setup_desireerr() {
@@ -2041,6 +2078,10 @@ setup_desireerr() {
         return
     fi
     step "Desireerr (requests for StashDB scenes, port $DESIREERR_PORT, in Docker)"
+    if (( ! DESIREERR_UP )); then
+        info "no image yet (above), so not in Docker this run; as it was until then"
+        return
+    fi
     (( DRY_RUN )) || info "runs $(helper desireerr status)"
     # Its admin is the login all the apps share, its StashDB key the one in secrets.ini, with
     # Jellyfin an API key named Desireerr for its Watch button, and its pushes go to our ntfy
