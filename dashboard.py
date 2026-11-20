@@ -38,6 +38,7 @@ import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor
+from html.parser import HTMLParser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -822,10 +823,75 @@ def tailscale_https():
 TITLE = re.compile(rb"<title[^>]*>(.*?)</title", re.I | re.S)
 
 
+class IconLinks(HTMLParser):
+    """A page's icons (<link rel="icon"> and the like), best first for a small badge: SVG, then
+    the biggest picture. Only those on the same server (a path, not another site's URL)."""
+
+    def __init__(self):
+        super().__init__()
+        self.found = []  # (rank, path)
+
+    def handle_starttag(self, tag, attrs):
+        a = {k: v or "" for k, v in attrs}
+        rel = a.get("rel", "").lower().split()
+        href = a.get("href", "").strip()
+        if tag != "link" or not ({"icon", "apple-touch-icon", "apple-touch-icon-precomposed"} & set(rel)) \
+                or not href or urllib.parse.urlsplit(href).scheme or href.startswith("//"):
+            return
+        sizes = [int(n) for n in re.findall(r"(\d+)x\d+", a.get("sizes", ""))]
+        svg = "svg" in a.get("type", "") or urllib.parse.urlsplit(href).path.endswith(".svg")
+        big = max(sizes, default=180 if "icon" not in rel else 16)  # a touch icon is 180px
+        self.found.append(((0 if svg else 1, -big), href))
+
+    @classmethod
+    def paths(cls, page, base="/"):
+        parser = cls()
+        try:
+            parser.feed(page.decode("utf-8", "replace"))
+        except Exception:  # whatever the page is like, it still has a favicon.ico, maybe
+            pass
+        paths = [urllib.parse.urljoin(base, href) for _, href in sorted(parser.found)]
+        return list(dict.fromkeys(paths + ["/favicon.ico"]))
+
+
+# What a picture is, by its first bytes (what the app says it is can be wrong)
+PICTURES = [(b"\x89PNG", "image/png"), (b"\x00\x00\x01\x00", "image/x-icon"),
+            (b"\xff\xd8", "image/jpeg"), (b"GIF8", "image/gif")]
+
+
+def picture_type(data):
+    for magic, kind in PICTURES:
+        if data.startswith(magic):
+            return kind
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    head = data[:4096].lower()
+    if b"<svg" in head and b"<html" not in head:
+        return "image/svg+xml"
+    return None
+
+
+def fetch_icon(address, port, paths, timeout=OTHERS_TIMEOUT):
+    """The first of these icons there is at address:port: (bytes, content type), or None."""
+    for path in paths:
+        conn = http.client.HTTPConnection(address, port, timeout=timeout)
+        try:
+            conn.request("GET", path, headers={"Host": f"localhost:{port}"})
+            resp = conn.getresponse()
+            data = resp.read(LOGO_MAX + 1) if resp.status == 200 else b""
+        except (OSError, http.client.HTTPException, ValueError):
+            data = b""
+        finally:
+            conn.close()
+        if data and len(data) <= LOGO_MAX and (kind := picture_type(data)):
+            return data, kind
+    return None
+
+
 def web_page(address, port, timeout=OTHERS_TIMEOUT):
     """What answers at address:port, if it's a web page: (its title, a digest of the page, to
-    tell one app on two ports from two apps), else None. Follows one redirect on the same
-    server (a login page, say). This page itself is None."""
+    tell one app on two ports from two apps, the paths of its icons, best first), else None.
+    Follows one redirect on the same server (a login page, say). This page itself is None."""
     path = "/"
     for _ in range(2):
         conn = http.client.HTTPConnection(address, port, timeout=timeout)
@@ -848,15 +914,17 @@ def web_page(address, port, timeout=OTHERS_TIMEOUT):
             conn.close()
         m = TITLE.search(body)
         title = html.unescape(m[1].decode("utf-8", "replace")).strip() if m else ""
-        return " ".join(title.split())[:80], hashlib.sha256(body).hexdigest()[:16]
+        return (" ".join(title.split())[:80], hashlib.sha256(body).hexdigest()[:16],
+                IconLinks.paths(body, path))
     return None
 
 
-def other_services(skip=(), sockets=None, https=None, probe=web_page):
+def other_services(skip=(), sockets=None, https=None, probe=web_page, icon=fetch_icon):
     """The box's web services besides ours (skip: their ports), one per app however many ports
     it has: [{"name", "ports", "lan": ports any device on the LAN reaches ({port: address}, ""
-    for all of the box's addresses), "https": its addresses on the tailnet}], by name. Only
-    those a viewer can reach: a service on 127.0.0.1 alone needs `tailscale serve`."""
+    for all of the box's addresses), "https": its addresses on the tailnet, "id": the page's
+    digest, "picture": its icon (bytes, content type) or None}], by name. Only those a viewer
+    can reach: a service on 127.0.0.1 alone needs `tailscale serve`."""
     sockets = listening() if sockets is None else sockets
     https = tailscale_https() if https is None else https
     binds = {}
@@ -882,18 +950,20 @@ def other_services(skip=(), sockets=None, https=None, probe=web_page):
     def look(port):
         for address in targets[port][1]:
             if (page := probe(address, port)) is not None:
-                return port, page
-        return port, None
+                return port, address, page
+        return port, None, None
 
     found = {}
     if targets:
         with ThreadPoolExecutor(max_workers=min(16, len(targets))) as pool:
-            for port, page in pool.map(look, sorted(targets)):
+            for port, address, page in pool.map(look, sorted(targets)):
                 if page is None:
                     continue
-                title, digest = page
-                entry = found.setdefault(digest, {"name": title or f"Port {port}", "ports": [],
-                                                  "lan": {}, "https": []})
+                title, digest, icons = page
+                if digest not in found:
+                    found[digest] = {"name": title or f"Port {port}", "ports": [], "lan": {},
+                                     "https": [], "id": digest, "picture": icon(address, port, icons)}
+                entry = found[digest]
                 entry["ports"].append(port)
                 if targets[port][0] is not None:
                     entry["lan"][str(port)] = targets[port][0]
@@ -2034,14 +2104,16 @@ def other_where(entry):
 
 
 def others_html(status, host, https):
-    """Other services: the box's web services that aren't torrent-box's (other_services)."""
+    """Other services: the box's web services that aren't torrent-box's (other_services), with
+    their own icons (served at /icon/other-<id>), else a globe of ours."""
     e = html.escape
     apps = []
     for entry in status.get("others") or ():
         if not (url := other_url(entry, host, https)):
             continue
-        apps.append(f'<a class="app" href="{url}"><span class="badge other">'
-                    f'{glyph(OTHER_ICON, "#fff")}</span><div><b>{e(entry["name"])}</b>'
+        badge = (f'<img class="logo" src="/icon/other-{e(entry["id"])}" alt="" width="30" height="30">'
+                 if entry.get("icon") else f'<span class="badge other">{glyph(OTHER_ICON, "#fff")}</span>')
+        apps.append(f'<a class="app" href="{url}">{badge}<div><b>{e(entry["name"])}</b>'
                     f'<div class="line muted" title="{e(other_where(entry))}">{e(other_where(entry))}</div></div></a>')
     if not apps:
         return ""
@@ -2441,6 +2513,7 @@ class Status:
         self.last_login = None  # {"time", "ok", "message"}: shown on the page for a while
         self.logos = Logos()
         self.others, self.others_job, self.others_at = None, None, 0.0
+        self.other_icons = {}  # "other-<id>" -> (bytes, content type), for /icon/
 
     def get(self):
         with self.lock:
@@ -2463,7 +2536,11 @@ class Status:
             self.others_at = time.monotonic()
         if job.done() or self.others is None:
             try:
-                self.others = job.result(timeout=OTHERS_WAIT)
+                found = job.result(timeout=OTHERS_WAIT)
+                # the icons are served at /icon/other-<id>; status.json only says there is one
+                self.other_icons = {f"other-{o['id']}": o["picture"] for o in found if o.get("picture")}
+                self.others = [{**{k: v for k, v in o.items() if k != "picture"},
+                                "icon": bool(o.get("picture"))} for o in found]
             except Exception as e:  # TimeoutError: the next request has them
                 if not isinstance(e, TimeoutError):
                     print(f"other services: {e!r}", file=sys.stderr, flush=True)
@@ -2539,7 +2616,8 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/status.json":
             body = json.dumps(self.status.get(), indent=1).encode()
             kind = "application/json"
-        elif path.startswith("/icon/") and (logo := self.status.logos.get(path[6:])):
+        elif path.startswith("/icon/") and (logo := self.status.other_icons.get(path[6:])
+                                            or self.status.logos.get(path[6:])):
             body, kind = logo
         elif path == "/tailscale":
             body = render_tailscale(self.status.get(), https=self.headers.get("X-Forwarded-Proto") == "https").encode()

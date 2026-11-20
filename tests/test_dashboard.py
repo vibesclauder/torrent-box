@@ -876,8 +876,9 @@ class OthersTest(unittest.TestCase):
             self.assertEqual(db.listening(Path(tmp, "none")), set())
 
     def test_one_entry_per_app_and_only_reachable_ones(self):
-        pages = {8100: ("Pantry", "aaa"), 8200: ("Pantry", "aaa"), 5173: ("Pantry", "bbb"),
-                 8000: ("Dev API", "ccc"), 9000: ("", "ddd"), 9091: ("Transmission", "eee")}
+        pages = {8100: ("Pantry", "aaa", ["/icon.svg"]), 8200: ("Pantry", "aaa", ["/icon.svg"]),
+                 5173: ("Pantry", "bbb", []), 8000: ("Dev API", "ccc", []), 9000: ("", "ddd", []),
+                 9091: ("Transmission", "eee", [])}
         probed = []
 
         def probe(address, port):
@@ -889,13 +890,24 @@ class OthersTest(unittest.TestCase):
                    ("100.101.102.103", 18100), ("fe80::1", 5357), ("0.0.0.0", 7000)}
         https = {8100: ["https://box.ts.net:18100/", "https://pantry.ts.net/"],
                  5173: ["https://box.ts.net:8443/"]}
-        found = db.other_services({9091}, sockets, https, probe)
+        icons = []
+
+        def icon(address, port, paths):
+            icons.append((address, port, paths))
+            return (b"<svg/>", "image/svg+xml") if paths else None
+
+        found = db.other_services({9091}, sockets, https, probe, icon)
         self.assertEqual(found, [
-            {"name": "Pantry", "ports": [5173], "lan": {}, "https": ["https://box.ts.net:8443/"]},
+            {"name": "Pantry", "ports": [5173], "lan": {}, "https": ["https://box.ts.net:8443/"],
+             "id": "bbb", "picture": None},
             {"name": "Pantry", "ports": [8100, 8200], "lan": {"8200": "192.168.1.50"},
-             "https": ["https://pantry.ts.net/", "https://box.ts.net:18100/"]},
-            {"name": "Port 9000", "ports": [9000], "lan": {"9000": ""}, "https": []},
+             "https": ["https://pantry.ts.net/", "https://box.ts.net:18100/"],
+             "id": "aaa", "picture": (b"<svg/>", "image/svg+xml")},
+            {"name": "Port 9000", "ports": [9000], "lan": {"9000": ""}, "https": [], "id": "ddd",
+             "picture": None},
         ])
+        self.assertIn(("127.0.0.1", 8100, ["/icon.svg"]), icons)  # where the page answered
+        self.assertEqual(len(icons), 3)  # once per app
         ports = {port for _, port in probed}
         self.assertNotIn(8000, ports)   # on 127.0.0.1 alone, not served on the tailnet
         self.assertNotIn(9091, ports)   # a tile's
@@ -914,7 +926,8 @@ class OthersTest(unittest.TestCase):
 
             def do_GET(self):
                 routes = {"/": (302, "", b"", self.start),
-                          "/login": (200, "text/html", b"<html><TITLE>\n My &amp; App </title>", ""),
+                          "/login": (200, "text/html", b"<html><TITLE>\n My &amp; App </title>"
+                                     b'<link rel="icon" href="img/fav.png" sizes="32x32">', ""),
                           "/api": (200, "application/json", b"{}", ""),
                           "/gone": (404, "text/html", b"<title>Error response</title>", "")}
                 status, kind, body, location = routes[self.path]
@@ -932,9 +945,10 @@ class OthersTest(unittest.TestCase):
         self.addCleanup(httpd.server_close)
         self.addCleanup(httpd.shutdown)
         port = httpd.server_address[1]
-        title, digest = db.web_page("127.0.0.1", port)
+        title, digest, icons = db.web_page("127.0.0.1", port)
         self.assertEqual(title, "My & App")
         self.assertEqual(len(digest), 16)
+        self.assertEqual(icons, ["/img/fav.png", "/favicon.ico"])  # relative to the login page
         for path in ("/api", "/gone"):  # not a page; an error page isn't the app
             with self.subTest(path=path):
                 App.start = path
@@ -943,6 +957,53 @@ class OthersTest(unittest.TestCase):
 
         App.server_version = db.Handler.server_version  # this page itself
         self.assertIsNone(db.web_page("127.0.0.1", port))
+
+    def test_icon_links(self):
+        page = (b'<html><head><link rel="stylesheet" href="/a.css">'
+                b'<link rel="icon" href="/favicon-16.png" sizes="16x16">'
+                b'<link rel="shortcut icon" href="/favicon-32.png" sizes="32x32">'
+                b'<link rel="apple-touch-icon" href="/touch.png">'
+                b'<link rel="icon" href="https://cdn.example/x.svg">'
+                b'<link rel="icon" href="//cdn.example/y.png">'
+                b'<link rel="icon" type="image/svg+xml" href="logo">'
+                b'<link rel="ICON" href="/favicon.ico"></head>')
+        self.assertEqual(db.IconLinks.paths(page, "/app/"), [
+            "/app/logo", "/touch.png", "/favicon-32.png", "/favicon-16.png", "/favicon.ico"])
+        self.assertEqual(db.IconLinks.paths(b"<html><title>x"), ["/favicon.ico"])
+
+    def test_picture_type(self):
+        cases = {b"\x89PNG\r\n": "image/png", b"\x00\x00\x01\x00\x01": "image/x-icon",
+                 b"\xff\xd8\xff": "image/jpeg", b"GIF89a": "image/gif",
+                 b"RIFF\x00\x00\x00\x00WEBPVP8": "image/webp",
+                 b'<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg"/>': "image/svg+xml",
+                 b"<!doctype html><html><svg></svg>": None, b"{}": None}
+        for data, kind in cases.items():
+            with self.subTest(data=data):
+                self.assertEqual(db.picture_type(data), kind)
+
+    def test_fetch_icon(self):
+        class App(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def do_GET(self):
+                files = {"/page.png": b"<html>not found, but 200</html>", "/favicon.ico": b"\x00\x00\x01\x00ico",
+                         "/huge.png": b"\x89PNG" + b"x" * db.LOGO_MAX}
+                body = files.get(self.path, b"")
+                self.send_response(200 if body else 404)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        httpd = ThreadingHTTPServer(("127.0.0.1", 0), App)
+        threading.Thread(target=httpd.serve_forever, args=(0.01,), daemon=True).start()
+        self.addCleanup(httpd.server_close)
+        self.addCleanup(httpd.shutdown)
+        port = httpd.server_address[1]
+        self.assertEqual(db.fetch_icon("127.0.0.1", port, ["/none.svg", "/page.png", "/huge.png", "/favicon.ico"]),
+                         (b"\x00\x00\x01\x00ico", "image/x-icon"))
+        self.assertIsNone(db.fetch_icon("127.0.0.1", port, ["/none.svg"]))
+        self.assertIsNone(db.fetch_icon("127.0.0.1", 1, ["/favicon.ico"]))
 
     def test_tailscale_https(self):
         serving = {"Web": {"box.ts.net:18100": {"Handlers": {"/": {"Proxy": "http://127.0.0.1:8100"}}},
@@ -978,11 +1039,17 @@ class OthersTest(unittest.TestCase):
         self.assertEqual(db.other_where(tailnet_only), "port 5173 · tailnet :8443")
 
     def test_render(self):
-        others = [{"name": "<Pantry>", "ports": [8200], "lan": {"8200": ""}, "https": []}]
+        others = [{"name": "<Pantry>", "ports": [8200], "lan": {"8200": ""}, "https": [],
+                   "id": "aaa", "icon": True},
+                  {"name": "Plain", "ports": [9000], "lan": {"9000": ""}, "https": [],
+                   "id": "bbb", "icon": False}]
         page = db.render({**PageTest.STATUS, "others": others}, "box.lan")
         self.assertIn("<h2>Other services</h2>", page)
         self.assertIn('href="http://box.lan:8200/"', page)
         self.assertIn("&lt;Pantry&gt;", page)
+        self.assertIn('src="/icon/other-aaa"', page)
+        self.assertNotIn("/icon/other-bbb", page)
+        self.assertEqual(page.count('class="badge other"'), 1)  # our globe for the one without
         self.assertNotIn("Other services", db.render(PageTest.STATUS, "box.lan"))
 
     def test_status_looks_in_the_background(self):
@@ -993,19 +1060,20 @@ class OthersTest(unittest.TestCase):
         def slow(skip):
             calls.append(skip)
             release.wait(5)
-            return [{"name": f"look {len(calls)}"}]
+            return [{"name": f"look {len(calls)}", "id": "aaa", "picture": (b"<svg/>", "image/svg+xml")}]
 
         with mock.patch.object(db, "other_services", slow), mock.patch.object(db, "OTHERS_WAIT", 0.05):
             self.assertEqual(STATUS_OTHERS(status, {"seerr": {}}), [])  # the first look is slow
             self.assertEqual(calls, [{5055}])
             release.set()
             status.others_job.result()
-            self.assertEqual(STATUS_OTHERS(status, {}), [{"name": "look 1"}])
+            self.assertEqual(STATUS_OTHERS(status, {}), [{"name": "look 1", "id": "aaa", "icon": True}])
+            self.assertEqual(status.other_icons, {"other-aaa": (b"<svg/>", "image/svg+xml")})
             self.assertEqual(len(calls), 1)  # not again before OTHERS_EVERY
             status.others_at -= db.OTHERS_EVERY + 1
             STATUS_OTHERS(status, {})
             status.others_job.result()
-            self.assertEqual(STATUS_OTHERS(status, {}), [{"name": "look 2"}])
+            self.assertEqual(STATUS_OTHERS(status, {})[0]["name"], "look 2")
         status.pool.shutdown()
 
 
