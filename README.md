@@ -70,7 +70,7 @@ and then:
 - installs rss2transmission and its systemd timer (user units; linger on), the
   [start page](#start-page), opens the ports in ufw (LAN-only for the web UIs, the media
   server, Samba, mDNS and SSH; also while ufw is off, so `sudo ufw enable` later doesn't lock
-  you out), and sends a test push.
+  you out), and sends a test push (not when the run changed nothing).
 
 Re-running is safe: existing config/secrets are kept, it only asks for missing values, and
 system files are only rewritten (and services only restarted) when something changes. The

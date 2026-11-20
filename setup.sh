@@ -2361,7 +2361,9 @@ setup_firewall() {
 finish() {
     step "Test notification"
     if (( DRY_RUN )); then
-        info "would run: ~/.local/bin/rss2transmission --test-notify"
+        info "would run: ~/.local/bin/rss2transmission --test-notify (if anything changes)"
+    elif [[ ! -s $TMP/changes ]]; then  # nothing new to say, nothing to check
+        info "not sent: this run changed nothing"
     elif ! "$BIN" -c "$CONFIG" --test-notify; then
         warn "the test push failed; check the network and [ntfy] server in $CONFIG"
     fi
