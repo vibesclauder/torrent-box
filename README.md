@@ -441,19 +441,33 @@ its Seerr: browse and search StashDB, request scenes, approve other users' reque
 performers and studios. Setup connects Whisparr like Radarr: the login, Transmission (with
 its own folder under `downloads/`), Prowlarr (which syncs it the indexers for its
 categories) and those categories' folders from `[routes]` as root folders (videos only).
-Desireerr comes from its own repo: setup clones it to `~/desireerr` (or uses the
-checkout beside torrent-box's, if there is one), fast-forwards it on
-each run (not if it has local changes) and runs it as a user unit
-(`journalctl --user -u desireerr`). Its admin is the login all the apps share (and follows
+Desireerr runs in Docker beside Whisparr, but there's no registry for its image: it's built
+on the box straight from [its repo](https://github.com/vibesclauder/desireerr)'s `main` (by
+each setup run, and the weekly update below), so a push there is all a new version needs; a
+build where nothing changed is the same image, and nothing restarts. Its settings and requests
+are in `~/.local/share/torrent-box/arr/desireerr/data`, its covers in `…/desireerr/cache`
+(`docker logs desireerr`; a box that ran it as a user unit before has its data moved there and
+the unit removed). To try changes before pushing them, `./setup_helper.py desireerr` switches
+what runs, from a Desireerr checkout (beside torrent-box's, else `~/desireerr`, or name it):
+
+| `./setup_helper.py desireerr …` | Runs |
+|---|---|
+| `local [checkout]` | an image built from the checkout as it is (uncommitted changes too); the weekly update leaves it alone |
+| `dev [checkout]` | the checkout's code itself, no build: after a change, `docker restart desireerr` |
+| `github` | the build of its repo again (and weekly updates) |
+| (nothing) | which of them runs now |
+
+The start page's Desireerr tile says when a checkout runs (`local 26c5293+`, the `+` for
+uncommitted changes, or `dev`). Its admin is the login all the apps share (and follows
 it when it changes). It browses StashDB with your API key (stashdb.org, your profile):
 setup takes it from Whisparr's StashDB import list if there is one, otherwise asks once (or
 `STASHDB_KEY`), and keeps it in `secrets.ini` as `stashdb_key`. Skipped, Desireerr asks for
 it itself. With Jellyfin, setup makes it a Jellyfin API key named Desireerr (Dashboard, API
 Keys), for the Watch button on downloaded scenes. Its pushes go to this box's ntfy server and
-topic, and it reads Whisparr's API key from Whisparr's config folder (setup tells it where,
-in a drop-in of its unit). Both get a tile on the start page. Set to `no` (and a setup run) removes
-Whisparr's container and its Prowlarr application and stops Desireerr; Whisparr's settings
-stay in `~/.local/share/torrent-box/arr/whisparr`, Desireerr's checkout and data stay too.
+topic, and it reads Whisparr's API key from Whisparr's config folder (mounted read-only in
+its container). Both get a tile on the start page. Set to `no` (and a setup run) removes
+Whisparr's and Desireerr's containers and Whisparr's Prowlarr application; their settings
+stay in `~/.local/share/torrent-box/arr/whisparr` and `…/desireerr`.
 
 Using it (setup does only the Jellyfin library; the rest is up to you):
 
@@ -486,8 +500,8 @@ Using it (setup does only the Jellyfin library; the rest is up to you):
   beside each scene (the performers as the cast, with their photos), and the cover is the
   scene's `folder.jpg` (also Desireerr's): Whisparr's own metadata (Settings → Metadata →
   Kodi (XBMC) / Emby) is off, as its `screenshot.jpg` would show up as a photo of its own in
-  each scene's folder. Setup lets Desireerr write on the storage disk for this (a drop-in,
-  `~/.config/systemd/user/desireerr.service.d/torrent-box.conf`). To keep the library
+  each scene's folder. Desireerr's container sees the storage disk at Whisparr's path, to
+  write them beside the scenes. To keep the library
   private, untick it in each other user's access (Users → Access).
 
 **On the TV (LG):** Seerr has no TV app; request from the phone (open Seerr, "Add to home
@@ -499,7 +513,8 @@ LG and Samsung TVs (not in LG's store: the `.ipk` is sideloaded, e.g. with the w
 `ares-install` or webOS Homebrew) with Seerr search built in, via its own server plugin.
 
 **Updates:** every Monday around 04:30 `torrent-box-arr-update.timer` pulls the apps' newest
-images and restarts the ones that got one, then pushes which (low priority), or that the
+images (Desireerr's: built again from its repo, unless a `local` build runs) and restarts the
+ones that got one, then pushes which (low priority), or that the
 update failed. A box that was off then catches up when it starts. In between,
 `torrent-box-arr-update-check.timer` asks the apps every hour whether a new version is out
 (the *arr apps' "New update is available" health check, Seerr's status) and updates just
@@ -507,8 +522,8 @@ those: their image often comes out a few hours after the release, so it tries ag
 until it's there, and pushes once one is running (its failures go only to `journalctl -u
 torrent-box-arr-update-check`; the weekly run pushes them). `[setup] arr_auto_update =
 no` (and a setup run) switches it off; then update by hand:
-`sudo docker compose -f ~/.local/share/torrent-box/arr/compose.yml pull` and the same with
-`up -d`. Right away: `sudo systemctl start torrent-box-arr-update`; what it did: `journalctl
+`sudo docker compose -f ~/.local/share/torrent-box/arr/compose.yml pull --ignore-buildable`,
+the same with `build --pull` (Desireerr), then with `up -d`. Right away: `sudo systemctl start torrent-box-arr-update`; what it did: `journalctl
 -u torrent-box-arr-update`. With `arr = no` setup stops the apps (their config stays for
 switching back on).
 

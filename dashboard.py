@@ -692,15 +692,36 @@ def check_seerr(s):
     return result(OK, f"running, version {seerr_version}", version=seerr_version)
 
 
-def check_desireerr(s):
+def desireerr_build(arr_dir):
+    """What runs as Desireerr, when it isn't the build of its GitHub repo: "local 26c5293+"
+    (a build of a checkout), "dev" (a checkout's code), else "". From the .env beside the
+    apps' compose.yml (setup_helper.py desireerr)."""
+    try:
+        lines = (Path(arr_dir) / ".env").read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return ""
+    env = dict(line.split("=", 1) for line in lines if "=" in line)
+    if env.get("DESIREERR_CODE", "").strip():
+        return "dev"
+    build = env.get("DESIREERR_BUILD", "").strip()
+    return "local " + build[6:] if build.startswith("local:") else ""
+
+
+def check_desireerr(s, arr_dir=DEFAULT_ARR_DIR):
+    """Its own status; and whether a checkout runs instead of the GitHub build (build=...)."""
+    build = desireerr_build(arr_dir)
+    note = [f"{build} build: ./setup_helper.py desireerr github goes back"] if build else []
     try:
         status = json.loads(http_get("http://127.0.0.1:5056/api/status"))
     except (OSError, ValueError) as e:
-        return result(DOWN, problem(e))
+        return result(DOWN, problem(e), note, build=build)
     if status.get("setup_needed"):
         return result(WARN, "waiting for its first sign-in",
-                      ["the setup code is in ~/.local/state/desireerr/setup-code"])
-    return result(OK, f"running, version {status.get('version', '?')}", version=status.get("version"))
+                      [f"the setup code is in {Path(arr_dir) / 'desireerr/data/setup-code'}"] + note,
+                      build=build)
+    version = status.get("version", "?")
+    return result(OK, f"running, version {version}" + (f" ({build} build)" if build else ""),
+                  version=status.get("version"), build=build)
 
 
 def check_rss2transmission(s, now=None):
@@ -1270,7 +1291,7 @@ def gather(s, arr_dir, pool, last_login=None):
                 checks[name] = lambda s, name=name: check_arr(name, arr_dir)
         checks["ncore"] = lambda s: check_ncore(arr_dir, last_login)
         if s["whisparr"]:  # Desireerr comes with Whisparr
-            checks["desireerr"] = check_desireerr
+            checks["desireerr"] = lambda s: check_desireerr(s, arr_dir)
     checks["rss2transmission"] = check_rss2transmission
     if s["samba"]:
         checks["samba"] = check_samba
@@ -2042,7 +2063,8 @@ def tile_line(c):
         if not (c["rate_down"] or c["rate_up"]):
             return "idle"
         return f'↓{short_speed(c["rate_down"])} ↑{short_speed(c["rate_up"])}'
-    return short_version(c["version"]) if c.get("version") else c["summary"]
+    line = short_version(c["version"]) if c.get("version") else c["summary"]
+    return f'{line} · {c["build"]}' if c.get("build") else line  # Desireerr: a checkout of it
 
 
 def tile_title(c):

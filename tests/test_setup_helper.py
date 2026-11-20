@@ -1351,10 +1351,12 @@ esac
         self.addCleanup(self.tmpdir.cleanup)
         tmp = Path(self.tmpdir.name)
         (tmp / "images").write_text("sonarr=sha256:a\nradarr=sha256:b\n")
-        # fake docker: "compose up" applies the "pulled" images
+        (tmp / "services").write_text("sonarr\nradarr\n")
+        # fake docker: "compose up" applies the "pulled" (and built) images
         (tmp / "docker").write_text(f"""#!/bin/bash
 case "$*" in
-  *"config --services") printf 'sonarr\\nradarr\\n' ;;
+  *"config --services") cat {tmp}/services ;;
+  *"build --quiet --pull desireerr") echo "$*" >>{tmp}/calls; [[ ! -f {tmp}/build-fails ]] ;;
   *"pull --quiet"*) echo "$*" >>{tmp}/calls; [[ -z $PULL_FAILS ]] ;;
   *"up -d"*) echo "$*" >>{tmp}/calls; [[ ! -f {tmp}/pulled ]] || cp {tmp}/pulled {tmp}/images ;;
   inspect*) grep "^${{@: -1}}=" {tmp}/images | cut -d= -f2 ;;
@@ -1404,6 +1406,46 @@ esac
         result, pushes = self.run_update(False, "--if-outdated")
         self.assertEqual((result.returncode, pushes), (0, ""))
         self.assertIn("no new image yet: sonarr", result.stdout)
+
+    def with_desireerr(self):
+        tmp = Path(self.tmpdir.name)
+        (tmp / "services").write_text("sonarr\nradarr\ndesireerr\n")
+        (tmp / "images").write_text("sonarr=sha256:a\nradarr=sha256:b\ndesireerr=sha256:c\n")
+        return tmp
+
+    def test_desireerr_built_again(self):
+        tmp = self.with_desireerr()
+        (tmp / "pulled").write_text("sonarr=sha256:a\nradarr=sha256:b\ndesireerr=sha256:NEW\n")
+        result, pushes = self.run_update()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = self.calls()
+        self.assertTrue(calls[0].endswith("build --quiet --pull desireerr"), calls)
+        self.assertIn("pull --quiet --ignore-buildable sonarr radarr desireerr", calls[1])
+        self.assertEqual(pushes, "Apps updated|New versions running: desireerr\n")
+
+    def test_desireerr_local_build_left_alone(self):
+        tmp = self.with_desireerr()
+        (tmp / ".env").write_text("DESIREERR_BUILD=local:26c5293+\n")
+        result, pushes = self.run_update()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(any(" build " in c for c in self.calls()), self.calls())
+        self.assertIn("desireerr: a build of your checkout runs; not rebuilt", result.stdout)
+
+    def test_desireerr_build_failure_pushed_others_updated(self):
+        tmp = self.with_desireerr()
+        (tmp / "build-fails").write_text("")
+        (tmp / "pulled").write_text("sonarr=sha256:NEW\nradarr=sha256:b\ndesireerr=sha256:c\n")
+        result, pushes = self.run_update()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Desireerr update failed|Couldn't build its image", pushes)
+        self.assertIn("Apps updated|New versions running: sonarr", pushes)
+
+    def test_if_outdated_doesnt_build_desireerr(self):
+        self.with_desireerr()
+        self.outdated("radarr")
+        result, _ = self.run_update(False, "--if-outdated")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(any(" build " in c for c in self.calls()), self.calls())
 
     def test_if_outdated_failure_not_pushed(self):
         self.outdated("sonarr")
@@ -1520,3 +1562,77 @@ class WhisparrStashdbKey(unittest.TestCase):
         self.assertEqual(sh.whisparr_stashdb_key(self.arr), "")
         self.make_db([(1, "StashDBFavoriteImport", "not json")])
         self.assertEqual(sh.whisparr_stashdb_key(self.arr), "")
+
+
+class DesireerrSwitchTest(unittest.TestCase):
+    """setup_helper.py desireerr: which build of Desireerr runs (.env beside compose.yml)."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmpdir.cleanup)
+        self.arr = Path(self.tmpdir.name) / "arr"
+        self.arr.mkdir()
+        (self.arr / "compose.yml").write_text("services:\n  whisparr:\n    image: x\n  desireerr:\n    build: y\n")
+        self.checkout = Path(self.tmpdir.name) / "desireerr"
+        self.checkout.mkdir()
+        for name in ("desireerr.py", "Dockerfile"):
+            (self.checkout / name).write_text("")
+        self.calls, self.said = [], []
+        patcher = mock.patch.object(sh, "docker_command", return_value=["docker"])
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def run_cmd(self, *cmd, check=False, **kw):
+        self.calls.append(list(cmd[0]))
+        if cmd[0][:2] == ["git", "-C"]:
+            out = "26c5293\n" if "rev-parse" in cmd[0] else " M desireerr.py\n"
+            return subprocess.CompletedProcess(cmd[0], 0, out, "")
+        return subprocess.CompletedProcess(cmd[0], 0, "", "")
+
+    def switch(self, mode, checkout=None):
+        return sh.cmd_desireerr(mode, checkout, self.arr, run=self.run_cmd, out=self.said.append)
+
+    def env(self):
+        return (self.arr / ".env").read_text()
+
+    def test_env_files(self):
+        path = self.arr / ".env"
+        self.assertEqual(sh.read_env(path), {})
+        path.write_text("# mine\nOTHER=1\nDESIREERR_CODE=/old\n")
+        sh.write_env(path, DESIREERR_CODE=None, DESIREERR_BUILD="local:abc")
+        self.assertEqual(path.read_text(), "# mine\nOTHER=1\nDESIREERR_BUILD=local:abc\n")
+        self.assertEqual(sh.read_env(path), {"OTHER": "1", "DESIREERR_BUILD": "local:abc"})
+        self.assertEqual(sh.desireerr_build({}), ("github", ""))
+        self.assertEqual(sh.desireerr_build({"DESIREERR_BUILD": "local:abc"}), ("local", "abc"))
+        self.assertEqual(sh.desireerr_build({"DESIREERR_CODE": "/c", "DESIREERR_BUILD": "local:a"}),
+                         ("dev", "/c"))
+
+    def test_local(self):
+        self.assertEqual(self.switch("local", self.checkout), 0)
+        self.assertIn(["docker", "build", "-q", "-t", "torrent-box/desireerr", str(self.checkout)], self.calls)
+        self.assertEqual(self.calls[-1][-3:], ["up", "-d", "desireerr"])
+        self.assertEqual(self.env(), "DESIREERR_BUILD=local:26c5293+\n")  # + : changes not committed
+        self.assertIn("weekly updates skip it", self.said[-1])
+        self.switch("status")
+        self.assertIn(f"a build of your checkout at 26c5293+", self.said[-1])
+
+    def test_dev_then_back_to_github(self):
+        self.assertEqual(self.switch("dev", self.checkout), 0)
+        self.assertEqual(self.env(), f"DESIREERR_CODE={self.checkout}\n")
+        self.assertFalse(any("build" in c for c in self.calls))  # the code as it is: no build
+        self.assertIn("docker restart desireerr", self.said[-1])
+        self.calls.clear()
+        self.assertEqual(self.switch("github"), 0)
+        self.assertEqual(self.env(), "")
+        compose = ["docker", "compose", "-f", str(self.arr / "compose.yml")]
+        self.assertEqual(self.calls, [compose + ["build", "-q", "desireerr"], compose + ["up", "-d", "desireerr"]])
+
+    def test_refusals(self):
+        self.assertEqual(self.switch("local", self.tmpdir.name), 1)  # not a checkout
+        self.assertIn("isn't a Desireerr checkout", self.said[-1])
+        (self.checkout / "Dockerfile").unlink()
+        self.assertEqual(self.switch("local", self.checkout), 1)  # local needs its Dockerfile
+        self.assertEqual(self.switch("dev", self.checkout), 0)    # dev doesn't
+        (self.arr / "compose.yml").write_text("services:\n  whisparr:\n    image: x\n")
+        self.assertEqual(self.switch("status"), 1)
+        self.assertIn("isn't in", self.said[-1])

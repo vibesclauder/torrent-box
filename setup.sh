@@ -43,12 +43,12 @@ DASHBOARD_PORT=80  # the box's name alone opens the start page
 DASHBOARD_ICONS=/usr/local/share/torrent-box/icons  # dashboard.WEBAPP_ICON_DIRS
 INSTALLED=/usr/local/share/torrent-box/installed.json  # dashboard.INSTALLED_FILE
 DESIREERR_REPO=https://github.com/vibesclauder/desireerr.git  # requests for StashDB scenes (public)
-# Desireerr's checkout: beside torrent-box's if it's there, else ~/desireerr, where its own unit
-# runs %h/desireerr/desireerr.py (anywhere else, our drop-in says where).
-DESIREERR_DIR=$HOME/desireerr
-if [[ -d $(dirname "$REPO")/desireerr/.git ]]; then DESIREERR_DIR=$(dirname "$REPO")/desireerr; fi
+DESIREERR_SOURCE=$DESIREERR_REPO#main  # its image is built from there (arr-compose-desireerr.yml)
 DESIREERR_PORT=5056
-DESIREERR_DATA=$HOME/.local/state/desireerr  # its unit's StateDirectory
+DESIREERR_DATA=$ARR_DIR/desireerr/data  # its settings, users and requests (its container's /data)
+# Before it ran in Docker, Desireerr was a user unit with these (moved to $ARR_DIR/desireerr)
+OLD_DESIREERR_DATA=$HOME/.local/state/desireerr
+OLD_DESIREERR_CACHE=$HOME/.cache/desireerr/images
 LIB=/usr/local/lib/torrent-box  # root's scripts: push, smartd-notify, arr-update
 NTFY_PUBLIC=https://ntfy.sh
 NTFY_PORT=2586  # our own ntfy server ([setup] own_ntfy = yes); 80 is the start page's
@@ -1805,7 +1805,12 @@ setup_arr() {
     local compose_pkg=docker-compose-v2 tz pgid app apps code dir roots=() series_root="" movie_root=""
     # Ubuntu's docker-compose-v2; Debian ships Compose v2 as docker-compose
     apt-cache show docker-compose-v2 >/dev/null 2>&1 || compose_pkg=docker-compose
-    apt_install docker.io "$compose_pkg"
+    # buildx: Docker's builder, for Desireerr's image (the old one is deprecated)
+    if apt-cache show docker-buildx >/dev/null 2>&1; then
+        apt_install docker.io "$compose_pkg" docker-buildx
+    else
+        apt_install docker.io "$compose_pkg"
+    fi
     systemctl is-enabled -q docker 2>/dev/null || as_root systemctl enable --now docker
 
     tz=$(timedatectl show -p Timezone --value 2>/dev/null || true)
@@ -1820,10 +1825,13 @@ setup_arr() {
     # (its config stays in $ARR_DIR/whisparr)
     { cat "$REPO/templates/arr-compose.yml"
       [[ $whisparr != yes ]] || cat "$REPO/templates/arr-compose-whisparr.yml"
+      ! desireerr_on || cat "$REPO/templates/arr-compose-desireerr.yml"
     } >"$TMP/compose.template"
     helper render "$TMP/compose.template" "PUID=$(id -u)" "PGID=${pgid:-107}" \
-        "TZ=${tz:-Etc/UTC}" "ARR_DIR=$ARR_DIR" "STORAGE_ROOT=$storage_root" >"$TMP/compose.yml"
+        "TZ=${tz:-Etc/UTC}" "ARR_DIR=$ARR_DIR" "STORAGE_ROOT=$storage_root" \
+        "DESIREERR_SOURCE=$DESIREERR_SOURCE" >"$TMP/compose.yml"
     update_file "$TMP/compose.yml" "$ARR_DIR/compose.yml" 644 || true
+    ! desireerr_on || desireerr_prepare
     # Pulls missing images and (re)creates only the containers whose definition changed.
     # Newer images are not pulled here; see the README for updating.
     as_root docker compose -f "$ARR_DIR/compose.yml" up -d --remove-orphans
@@ -1986,72 +1994,54 @@ setup_rss2transmission() {
 # dashboard.py on port 80: links to the web apps and their health. A system unit running as
 # you (see systemd/torrent-box-dashboard.service); the program is root's, since it runs with
 # the capability to use a low port.
-# Desireerr, with Whisparr: its own (public) repo, cloned to DESIREERR_DIR and fast-forwarded
-# on each run unless it has local changes, run by a user unit like rss2transmission. With
-# Whisparr switched off, the unit goes; the checkout and its data (~/.local/state/desireerr)
-# stay.
+# Desireerr, with Whisparr: a container beside Whisparr's (templates/arr-compose-desireerr.yml),
+# its image built from its repo. Before, it was a user unit running a checkout: the unit goes,
+# its data moves to $ARR_DIR/desireerr (a checkout stays; setup_helper.py desireerr local|dev
+# runs it in the container).
+desireerr_unit_gone() {
+    [[ -f $USER_UNITS/desireerr.service ]] || return 0
+    run systemctl --user disable --now desireerr.service
+    run rm -f "$USER_UNITS/desireerr.service" "$USER_UNITS/desireerr.service.d/torrent-box.conf"
+    run systemctl --user daemon-reload
+}
+
+# Before its container starts (setup_arr): the unit gone, its data moved, its folders there,
+# and its image built from $DESIREERR_SOURCE: cached, so only a new commit makes a new one,
+# and the next "up" recreates the container with it. Not while a build of your checkout runs.
+desireerr_prepare() {
+    local dir
+    if [[ -f $USER_UNITS/desireerr.service ]]; then
+        info "Desireerr: from its user unit to a container"
+        desireerr_unit_gone
+    fi
+    if [[ -d $OLD_DESIREERR_DATA && ! -e $DESIREERR_DATA ]]; then
+        [[ -d $ARR_DIR/desireerr ]] || run mkdir -p "$ARR_DIR/desireerr"
+        run mv "$OLD_DESIREERR_DATA" "$DESIREERR_DATA"
+        if [[ -d $OLD_DESIREERR_CACHE && ! -e $ARR_DIR/desireerr/cache ]]; then
+            run mv "$OLD_DESIREERR_CACHE" "$ARR_DIR/desireerr/cache"
+        fi
+    fi
+    for dir in data cache no-code; do
+        [[ -d $ARR_DIR/desireerr/$dir ]] || run mkdir -p "$ARR_DIR/desireerr/$dir"
+    done
+    if grep -q '^DESIREERR_BUILD=local:' "$ARR_DIR/.env" 2>/dev/null; then
+        info "Desireerr: a build of your checkout runs, not rebuilt (./setup_helper.py desireerr github: back)"
+    elif ! as_root docker compose -f "$ARR_DIR/compose.yml" build -q desireerr; then
+        warn "couldn't build Desireerr's image from $DESIREERR_SOURCE; it keeps the one it has"
+    fi
+}
+
 setup_desireerr() {
-    local unit=$USER_UNITS/desireerr.service changed=0 before
     if ! desireerr_on; then
-        if [[ -f $unit ]]; then
+        if [[ -f $USER_UNITS/desireerr.service ]]; then
             step "Desireerr"
-            run systemctl --user disable --now desireerr.service
-            run rm -f "$unit" "$USER_UNITS/desireerr.service.d/torrent-box.conf"
-            run systemctl --user daemon-reload
-            info "stopped; $DESIREERR_DIR and its data ($DESIREERR_DATA) are kept"
+            desireerr_unit_gone
+            info "stopped; its data ($OLD_DESIREERR_DATA) is kept"
         fi
         return
     fi
-    step "Desireerr (requests for StashDB scenes, port $DESIREERR_PORT)"
-    if [[ ! -e $DESIREERR_DIR ]]; then
-        run git clone -q "$DESIREERR_REPO" "$DESIREERR_DIR"
-        changed=1
-    elif [[ ! -d $DESIREERR_DIR/.git ]]; then
-        warn "$DESIREERR_DIR is not a git checkout; leaving it as it is"
-    elif [[ -n $(git -C "$DESIREERR_DIR" status --porcelain --untracked-files=no) ]]; then
-        warn "$DESIREERR_DIR has local changes; not updating it"
-    elif (( DRY_RUN )); then
-        info "would run: git -C $(quote "$DESIREERR_DIR") pull --ff-only"
-        changed "Desireerr: updated, if it has a new version"
-    else
-        before=$(git -C "$DESIREERR_DIR" rev-parse HEAD)
-        if ! git -C "$DESIREERR_DIR" pull -q --ff-only; then
-            warn "couldn't update $DESIREERR_DIR; keeping the version it has"
-        elif [[ $(git -C "$DESIREERR_DIR" rev-parse HEAD) != "$before" ]]; then
-            info "updated to $(git -C "$DESIREERR_DIR" log -1 --format='%h %s')"
-            changed "Desireerr updated to $(git -C "$DESIREERR_DIR" log -1 --format='%h %s')"
-            changed=1
-        else
-            info "up to date: $DESIREERR_DIR"
-        fi
-    fi
-    if [[ ! -f $DESIREERR_DIR/systemd/desireerr.service ]]; then
-        if (( DRY_RUN )); then
-            info "would install its user unit and start it"
-        else
-            warn "no $DESIREERR_DIR/systemd/desireerr.service; Desireerr is not started"
-        fi
-        return
-    fi
-    if update_file "$DESIREERR_DIR/systemd/desireerr.service" "$unit" 644; then
-        changed=1
-    fi
-    # It writes the scenes' .nfo files for Jellyfin beside them: the storage disk is writable
-    # in its sandbox (the rest stays read-only). And it reads Whisparr's API key from the
-    # config.xml in Whisparr's container folder. A checkout other than ~/desireerr: its unit's
-    # command, run from there.
-    printf '%s\n' "# torrent-box: Desireerr writes the scenes' .nfo files and reads Whisparr's key (setup.sh writes this)" \
-        "[Service]" "ReadWritePaths=-$storage_root" \
-        "Environment=DESIREERR_WHISPARR_CONFIG=$ARR_DIR/whisparr/config.xml" >"$TMP/desireerr-storage.conf"
-    if [[ $DESIREERR_DIR != "$HOME/desireerr" ]]; then
-        local exec_start
-        exec_start=$(grep -m1 '^ExecStart=' "$DESIREERR_DIR/systemd/desireerr.service")
-        printf '%s\n' "ExecStart=" "${exec_start//%h\/desireerr\//$DESIREERR_DIR/}" >>"$TMP/desireerr-storage.conf"
-    fi
-    if update_file "$TMP/desireerr-storage.conf" "$USER_UNITS/desireerr.service.d/torrent-box.conf" 644; then
-        changed=1
-    fi
-    if (( changed )); then run systemctl --user daemon-reload; fi
+    step "Desireerr (requests for StashDB scenes, port $DESIREERR_PORT, in Docker)"
+    (( DRY_RUN )) || info "runs $(helper desireerr status)"
     # Its admin is the login all the apps share, its StashDB key the one in secrets.ini, with
     # Jellyfin an API key named Desireerr for its Watch button, and its pushes go to our ntfy
     # server and topic (all through the environment, never the command line). It follows a
@@ -2060,31 +2050,29 @@ setup_desireerr() {
     if (( DRY_RUN )); then
         info "would set its admin ('${rpc_user:-?}', the shared login), StashDB key, Jellyfin key and ntfy topic, where not done yet"
     elif [[ -n ${rpc_user:-} || -n $stashdb_key || -n ${ntfy_topic:-} ]]; then
-        local out line jf_key=""
+        local out jf_key="" var vars=(DESIREERR_ADMIN_USER DESIREERR_ADMIN_PASSWORD DESIREERR_STASHDB_KEY
+                                       DESIREERR_JELLYFIN_KEY DESIREERR_NTFY_SERVER DESIREERR_NTFY_TOPIC)
+        local pass=()
+        for var in "${vars[@]}"; do pass+=(-e "$var"); done
         if [[ $media_server == jellyfin ]] &&
                 ! jf_key=$(JF_USER=${JELLYFIN_USER:-${rpc_user:-}} JF_PASSWORD=${JELLYFIN_PASSWORD:-${rpc_password:-}} \
                     helper jellyfin-key Desireerr); then
             jf_key=""
             warn "no Jellyfin API key for its Watch button (above); add one in its Settings"
         fi
+        # "init" in a container of its own, with the same data; the names (-e NAME) go on the
+        # command line, their values through sudo's environment
         if out=$(DESIREERR_ADMIN_USER=${rpc_user:-} DESIREERR_ADMIN_PASSWORD=${rpc_password:-} \
                 DESIREERR_STASHDB_KEY=$stashdb_key DESIREERR_JELLYFIN_KEY=$jf_key \
                 DESIREERR_NTFY_SERVER=${ntfy_server:-} DESIREERR_NTFY_TOPIC=${ntfy_topic:-} \
-                PYTHONDONTWRITEBYTECODE=1 python3 "$DESIREERR_DIR/desireerr.py" init --data "$DESIREERR_DATA"); then
+                sudo --preserve-env="$(IFS=,; echo "${vars[*]}")" \
+                docker compose -f "$ARR_DIR/compose.yml" run --rm --no-deps -T "${pass[@]}" desireerr init); then
             report "" "Desireerr: " <<<"$out"
         else
             warn "couldn't set its admin and StashDB key (see above); its first visit asks instead"
         fi
     fi
-    if ! systemctl --user is-enabled -q desireerr.service 2>/dev/null; then
-        run systemctl --user enable --now desireerr.service
-    elif ! systemctl --user is-active -q desireerr.service; then
-        run systemctl --user start desireerr.service
-    elif (( changed )); then
-        run systemctl --user restart desireerr.service
-    else
-        info "running"
-    fi
+    info "its log: docker logs desireerr"
 }
 
 # Whisparr's folders as a Jellyfin library of the type "Home videos and photos": its videos

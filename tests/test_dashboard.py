@@ -1283,7 +1283,7 @@ class PageTest(unittest.TestCase):
                  "whisparr": whisparr}
             with mock.patch.object(db, "check_arr", lambda name, arr_dir: db.result(db.OK, "x")), \
                     mock.patch.object(db, "check_seerr", lambda s: db.result(db.OK, "x")), \
-                    mock.patch.object(db, "check_desireerr", lambda s: db.result(db.OK, "x")), \
+                    mock.patch.object(db, "check_desireerr", lambda s, arr_dir: db.result(db.OK, "x")), \
                     mock.patch.object(db, "check_ncore", lambda *a: db.result(db.OK, "x")), \
                     mock.patch.object(db, "check_storage", lambda s: db.result(db.OK, "x")), \
                     mock.patch.object(db, "check_disk", lambda s: db.result(db.OK, "x")), \
@@ -1302,6 +1302,22 @@ class PageTest(unittest.TestCase):
             self.assertEqual((r["state"], r["summary"]), (state, summary))
         with mock.patch.object(db, "http_get", side_effect=ConnectionRefusedError(111, "refused")):
             self.assertEqual(db.check_desireerr({})["state"], db.DOWN)
+
+    def test_desireerr_check_says_which_build(self):
+        with tempfile.TemporaryDirectory() as arr, \
+                mock.patch.object(db, "http_get", lambda url: b'{"setup_needed": false, "version": "1.3"}'):
+            env = Path(arr, ".env")
+            self.assertEqual(db.check_desireerr({}, arr)["build"], "")  # no .env: GitHub's
+            for text, build in (("DESIREERR_BUILD=local:26c5293+\n", "local 26c5293+"),
+                                ("DESIREERR_CODE=/home/me/desireerr\n", "dev"), ("OTHER=1\n", "")):
+                with self.subTest(env=text):
+                    env.write_text(text)
+                    c = db.check_desireerr({}, arr)
+                    self.assertEqual((c["state"], c["build"]), (db.OK, build))
+                    self.assertEqual(db.tile_line(c), "v1.3" + (f" · {build}" if build else ""))
+            with mock.patch.object(db, "http_get", lambda url: b'{"setup_needed": true}'):
+                c = db.check_desireerr({}, arr)
+            self.assertIn(f"the setup code is in {arr}/desireerr/data/setup-code", c["details"])
 
     def test_seerr_check(self):
         appdata = b'{"appData": true, "appDataPath": "/app/config", "appDataPermissions": true}'

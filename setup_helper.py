@@ -43,6 +43,7 @@ import re
 import secrets
 import sqlite3
 import string
+import subprocess
 import sys
 import tempfile
 import xml.etree.ElementTree as ET
@@ -1361,6 +1362,113 @@ def rpc_check(url, user, password, timeout=10):
     return 0, "login works"
 
 
+### Desireerr: which build runs
+
+# Desireerr's container (templates/arr-compose-desireerr.yml) runs the image built from its
+# GitHub repo, a build of your checkout ("local"), or your checkout's code as it is ("dev").
+# Which one: in .env beside compose.yml, which Compose reads for ${DESIREERR_CODE} (and
+# arr-update and the start page for DESIREERR_BUILD).
+ARR_DIR = Path("~/.local/share/torrent-box/arr").expanduser()  # setup.sh's ARR_DIR
+DESIREERR_IMAGE = "torrent-box/desireerr"
+DESIREERR_MODES = ("status", "github", "local", "dev")
+
+
+def read_env(path):
+    """A Compose .env file's NAME=value lines as a dict ({} when there's none)."""
+    try:
+        lines = Path(path).read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        return {}
+    pairs = (line.split("=", 1) for line in lines if "=" in line and not line.lstrip().startswith("#"))
+    return {k.strip(): v.strip() for k, v in pairs}
+
+
+def write_env(path, **values):
+    """Set these names in a .env file (None: removed), keeping its other lines."""
+    path = Path(path)
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        lines = []
+    lines = [line for line in lines if line.split("=", 1)[0].strip() not in values]
+    lines += [f"{k}={v}" for k, v in values.items() if v is not None]
+    path.write_text("".join(f"{line}\n" for line in lines), encoding="utf-8")
+
+
+def desireerr_build(env):
+    """What the .env says Desireerr runs: ("github" | "local" | "dev", what exactly)."""
+    if env.get("DESIREERR_CODE"):
+        return "dev", env["DESIREERR_CODE"]
+    if env.get("DESIREERR_BUILD", "").startswith("local:"):
+        return "local", env["DESIREERR_BUILD"][6:]
+    return "github", ""
+
+
+def default_checkout():
+    """Desireerr's checkout: beside torrent-box's, else ~/desireerr (as setup.sh used to)."""
+    beside = Path(__file__).resolve().parent.parent / "desireerr"
+    return beside if beside.is_dir() else Path.home() / "desireerr"
+
+
+def checkout_version(path, run=subprocess.run):
+    """A checkout's commit, short, with a "+" for changes not committed: "26c5293+"."""
+    git = ["git", "-C", str(path)]
+    commit = run(git + ["rev-parse", "--short", "HEAD"], capture_output=True, text=True).stdout.strip()
+    dirty = run(git + ["status", "--porcelain", "--untracked-files=no"], capture_output=True,
+                text=True).stdout.strip()
+    return (commit or "?") + ("+" if dirty else "")
+
+
+def docker_command():
+    """docker, through sudo unless you may use its socket (the docker group)."""
+    return ["docker"] if os.access("/var/run/docker.sock", os.W_OK) else ["sudo", "docker"]
+
+
+def cmd_desireerr(mode, checkout=None, arr_dir=ARR_DIR, run=subprocess.run, out=print):
+    arr_dir = Path(arr_dir)
+    compose_file, env_file = arr_dir / "compose.yml", arr_dir / ".env"
+    try:
+        compose_text = compose_file.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        compose_text = ""
+    if "\n  desireerr:" not in compose_text:
+        out(f"Desireerr isn't in {compose_file}: setup.sh puts it there with [setup] whisparr = yes")
+        return 1
+    current, what = desireerr_build(read_env(env_file))
+    if mode == "status":
+        out({"github": "the build of its GitHub repo (updated weekly)",
+             "local": f"a build of your checkout at {what} (weekly updates skip it)",
+             "dev": f"your checkout's code as it is, from {what}"}[current])
+        return 0
+    docker = docker_command()
+    compose = docker + ["compose", "-f", str(compose_file)]
+    if mode in ("local", "dev"):
+        checkout = Path(checkout or default_checkout()).expanduser().resolve()
+        needed = ["desireerr.py"] + (["Dockerfile"] if mode == "local" else [])
+        if missing := [n for n in needed if not (checkout / n).is_file()]:
+            out(f"{checkout} isn't a Desireerr checkout (no {', '.join(missing)})")
+            return 1
+    if mode == "local":
+        version = checkout_version(checkout, run)
+        run(docker + ["build", "-q", "-t", DESIREERR_IMAGE, str(checkout)], check=True)
+        write_env(env_file, DESIREERR_BUILD=f"local:{version}", DESIREERR_CODE=None)
+    elif mode == "dev":
+        write_env(env_file, DESIREERR_CODE=str(checkout), DESIREERR_BUILD=None)
+    else:
+        write_env(env_file, DESIREERR_BUILD=None, DESIREERR_CODE=None)
+        run(compose + ["build", "-q", "desireerr"], check=True)
+    run(compose + ["up", "-d", "desireerr"], check=True)
+    if mode == "local":
+        out(f"Desireerr: your checkout at {version}; weekly updates skip it until "
+            f"`./setup_helper.py desireerr github`")
+    elif mode == "dev":
+        out(f"Desireerr: the code in {checkout}; after a change: docker restart desireerr "
+            f"(`./setup_helper.py desireerr github`: back)")
+    else:
+        out("Desireerr: the build of its GitHub repo, updated weekly again")
+    return 0
+
+
 ### Main
 
 def main(argv=None):
@@ -1438,6 +1546,12 @@ def main(argv=None):
     sub.add_parser("serve-services")
     sub.add_parser("service-host")
     sub.add_parser("storage-candidates", help="lsblk -J on stdin -> tab-separated candidates")
+    p = sub.add_parser("desireerr", help="which Desireerr runs: the build of its GitHub repo, "
+                       "a build of your checkout (local), or your checkout's code (dev)")
+    p.add_argument("mode", nargs="?", default="status", choices=DESIREERR_MODES)
+    p.add_argument("checkout", nargs="?", help="local, dev: the checkout (default: beside "
+                   "torrent-box's, else ~/desireerr)")
+    p.add_argument("--arr-dir", default=ARR_DIR, help=argparse.SUPPRESS)
     args = ap.parse_args(argv)
 
     try:
@@ -1537,6 +1651,11 @@ def main(argv=None):
         elif args.cmd == "storage-candidates":
             for c in storage_candidates(sys.stdin.read()):
                 print("\t".join(c))
+        elif args.cmd == "desireerr":
+            return cmd_desireerr(args.mode, args.checkout, args.arr_dir)
+    except subprocess.CalledProcessError as e:
+        print(f"setup_helper {args.cmd}: {' '.join(e.cmd)} failed", file=sys.stderr)
+        return 2
     except (OSError, ValueError, KeyError, configparser.Error,
             rss2transmission.ConfigError) as e:
         print(f"setup_helper {args.cmd}: {e}", file=sys.stderr)

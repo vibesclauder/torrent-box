@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # torrent-box: update the Docker apps (Prowlarr, Sonarr, Radarr, Seerr, Whisparr) to their newest
-# images. Run weekly by torrent-box-arr-update.timer; pushes which apps were updated, or that it
+# images, and build Desireerr's again from its repo (only a new commit makes a new image; not
+# while a build of your checkout runs, see setup_helper.py desireerr). Run weekly by torrent-box-arr-update.timer; pushes which apps were updated, or that it
 # failed. With --if-outdated (hourly, torrent-box-arr-update-check.timer) only the apps that
 # say a new version is out, and quietly: no push until one really got a new image (an app
 # knows of a release a few hours before its image is out), failures only in the journal.
@@ -60,8 +61,18 @@ if [[ -n $if_outdated ]]; then
     echo "a new version is out: $services"
 fi
 before=$(images)
-# shellcheck disable=SC2086  # $services: the names, split
-compose pull --quiet $services || fail "couldn't download the new images"
+if [[ -z $if_outdated ]] && grep -qx desireerr <<<"$services"; then
+    if grep -q '^DESIREERR_BUILD=local:' "$(dirname "$compose_file")/.env" 2>/dev/null; then
+        echo "desireerr: a build of your checkout runs; not rebuilt"
+    elif ! compose build --quiet --pull desireerr; then
+        echo "couldn't build Desireerr's image; it keeps the one it has" >&2
+        notify "Desireerr update failed" \
+            "Couldn't build its image from GitHub; it keeps the one it has (journalctl -u torrent-box-arr-update)" \
+            default warning
+    fi
+fi
+# shellcheck disable=SC2086  # $services: the names, split (Desireerr's image is built, not pulled)
+compose pull --quiet --ignore-buildable $services || fail "couldn't download the new images"
 if [[ -n $if_outdated ]]; then
     compose up -d $services || fail "couldn't restart the apps on the new images"
 else
