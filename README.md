@@ -67,6 +67,9 @@ and then:
   Transmission, the media server and Samba wait for the disk,
   lets Transmission write to the disk under Ubuntu's AppArmor profile (a rule in
   `/etc/apparmor.d/local/transmission-daemon`),
+  caps logs so they don't grow without bound: the systemd journal (every service, and the
+  user units) is kept **3 days** (`/etc/systemd/journald.conf.d/torrent-box.conf`), and each
+  Docker app's stdout log to ~1 MB × 3 files (the apps keep their own logs and databases),
 - installs rss2transmission and its systemd timer (user units; linger on), the
   [start page](#start-page), opens the ports in ufw (LAN-only for the web UIs, the media
   server, Samba, mDNS and SSH; also while ufw is off, so `sudo ufw enable` later doesn't lock

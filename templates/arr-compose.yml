@@ -6,9 +6,18 @@
 # storage disk at the same path as Transmission, so imports are hardlinks and no remote
 # path mappings are needed.
 
+# Cap each container's stdout log: ~1 MB x 3 files. Keeps a day's worth for debugging
+# without growing without bound (Docker's json-file is size-based, not time-based).
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "1m"
+    max-file: "3"
+
 x-arr: &arr
   network_mode: host
   restart: unless-stopped
+  logging: *logging
   environment:
     PUID: "@PUID@"
     PGID: "@PGID@"
@@ -45,6 +54,7 @@ services:
     init: true
     network_mode: host
     restart: unless-stopped
+    logging: *logging
     user: "@PUID@:@PGID@"
     environment:
       TZ: "@TZ@"

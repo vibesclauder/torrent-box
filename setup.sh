@@ -907,7 +907,18 @@ install_dropins() {
         fi
     done
     if (( changed )); then as_root systemctl daemon-reload; fi
+    install_journald_retention
     allow_storage_apparmor
+}
+
+# Keep the journal to 3 days (see systemd/journald.conf). Covers every system service and the
+# user units, so a fault is still visible the day after without the log growing without bound.
+install_journald_retention() {
+    helper render --strip-comments "$REPO/systemd/journald.conf" >"$TMP/journald.conf"
+    if update_file "$TMP/journald.conf" \
+            /etc/systemd/journald.conf.d/torrent-box.conf 644 root; then
+        as_root systemctl restart systemd-journald  # journald re-reads its config on restart
+    fi
 }
 
 # Ubuntu confines transmission-daemon with an AppArmor profile that has no access to the

@@ -13,6 +13,7 @@
     container_name: desireerr
     network_mode: host
     restart: unless-stopped
+    logging: *logging
     user: "@PUID@:@PGID@"
     environment:
       DESIREERR_WHISPARR_CONFIG: /whisparr/config.xml
