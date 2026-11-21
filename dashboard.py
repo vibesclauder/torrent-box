@@ -2472,11 +2472,14 @@ def render_tailscale(status, https=False):
         approved, served = set(tailnet.get("approved", ())), tailnet.get("served", {})
         tags = tailnet.get("tags") or []
         box_tag = tags[0] if tags else "tag:server"
+        grants = [{"src": ["autogroup:admin"], "dst": [f"svc:{n}" for n in wanted], "ip": ["443"]}]
+        if "seerr" in wanted:  # the one app other members of the tailnet (family) may use
+            grants.append({"src": ["autogroup:member"], "dst": ["svc:seerr"], "ip": ["443"]})
         policy = "\n".join([
             f'"tagOwners": {json.dumps({box_tag: ["autogroup:admin"], "tag:torrent-box": ["autogroup:admin"]})},',
             f'"autoApprovers": {json.dumps({"services": {"tag:torrent-box": [box_tag]}})},',
             '"grants": [',
-            f'  {json.dumps({"src": ["autogroup:member"], "dst": [f"svc:{n}" for n in wanted], "ip": ["443"]})}',
+            ",\n".join(f"  {json.dumps(g)}" for g in grants),
             "]"])
         rows = []
         for name in wanted:
@@ -2497,7 +2500,8 @@ app's name is ready, its tile links to its HTTPS port on <code>{e(tailnet["name"
 <ol class="steps">
 <li>{dot(tailnet.get("certs"), "on" if tailnet.get("certs") else "off")}<div><b>Admin console → DNS</b>: MagicDNS and HTTPS Certificates on.</div></li>
 <li>{dot(None, "shown by Approved and Reachable below")}<div><b>Admin console → Access controls</b>: a tag for the box, approval of
-its services, and access to them (merge with what's there):<pre>{e(policy)}</pre></div></li>
+its services, and access to them: admins get all of them, other members only Seerr (merge with
+what's there):<pre>{e(policy)}</pre></div></li>
 <li>{dot(bool(tags), ", ".join(tags) or "no tag")}<div><b>Admin console → Machines</b>: this box → Edit ACL tags → <code>{e(box_tag)}</code>{now}.
 A tagged device belongs to the tag: rules for your own devices (<code>autogroup:self</code>) no longer
 cover it. Check that its key expiry stays off.</div></li>

@@ -319,6 +319,73 @@ viewer's device reaches it (the page tries; else the tile keeps the app's HTTPS 
 box no longer runs lose their service on the next run of setup; other services the box hosts
 are left alone.
 
+### Family: Jellyfin and Seerr only, one admin
+
+Someone who lives with you can watch and request from anywhere without seeing anything else
+on the box: not Transmission, Sonarr, Radarr, Prowlarr, Whisparr, Desireerr, the start page,
+ntfy or the Samba share. You stay the only admin everywhere: in Tailscale, in Jellyfin and in
+Seerr (whose admin is your Jellyfin admin account). Four steps, none of which a script can do
+for you:
+
+1. **Invite them to the tailnet.** Admin console → Users → Invite users, with the e-mail of
+   the account they'll log in with; their role stays **Member** (not Admin, not Owner). They
+   install the Tailscale app on their phone/TV box/laptop, accept the invite and log in.
+   (Check your Tailscale plan's user limit.)
+
+2. **Narrow the access policy.** Admin console → Access controls. A new tailnet starts with a
+   rule that lets everyone reach everything, which lets the family member in everywhere, so
+   **delete it**. The `/tailscale` page suggests the Services' grant already split like this
+   (you get all of them, other members only Seerr); an older version gave them to every
+   member, so check yours. Rules for the rest of the box (merge with your policy; the box's
+   tag is `tag:server` unless `/tailscale` says otherwise). Admins are whoever has the Admin
+   role (you), members everyone else you invite:
+
+   ```jsonc
+   {
+     "grants": [
+       // admins: the box, and all of its Services
+       {"src": ["autogroup:admin"], "dst": ["*"], "ip": ["*"]},
+       {"src": ["autogroup:admin"],
+        "dst": ["svc:torrent-box", "svc:seerr", "svc:desireerr"], "ip": ["443"]},
+
+       // members: Jellyfin and Seerr, nothing else
+       {"src": ["autogroup:member"], "dst": ["tag:server"],
+        "ip": ["tcp:8096", "tcp:18096", "tcp:5055", "tcp:15055"]},
+       {"src": ["autogroup:member"], "dst": ["svc:seerr"], "ip": ["443"]}
+     ],
+     // the console refuses to save the policy when one of these stops holding
+     // (replace the address with the member's login)
+     "tests": [
+       {"src": "family@example.com",
+        "accept": ["tag:server:18096", "tag:server:15055"],
+        "deny":   ["tag:server:19091", "tag:server:18989", "tag:server:17878",
+                   "tag:server:19696", "tag:server:16969", "tag:server:15056",
+                   "tag:server:9091", "tag:server:80", "tag:server:445"]}
+     ]
+   }
+   ```
+
+   The Services you don't want them to have simply don't appear in a member rule. Put every
+   other Service the box serves (`tailscale serve status` lists them) in the admin rule. A
+   tagged box isn't covered by `autogroup:self`, which is why you need the admin rule at all.
+
+3. **Jellyfin account.** Dashboard → Users → Add user. Leave *Allow this user to manage the
+   server* off (you're the only admin), pick the libraries they may see, and leave media
+   downloads and deletion off unless they want them. They log in to the Jellyfin app with the
+   box's HTTPS address, `https://<box>.<tailnet>.ts.net:18096` (the LAN's `http://<box>:8096`
+   also works at home).
+
+4. **Seerr.** They open `https://seerr.<tailnet>.ts.net` (`:15055` on the box's name until
+   Seerr has its own name) and sign in with their Jellyfin account; or import them: Seerr →
+   Users → Import Jellyfin Users. A new user may request but not approve: every request
+   waits for you (and pushes to your ntfy topic). To cap how much they can ask for, set a
+   movie and series request limit per user (Seerr → Users).
+
+Check it from their device (Tailscale on, Wi-Fi off): Jellyfin and Seerr open;
+`http://<box>/`, `:19091` (Transmission), `:18989`, `:17878`, `:19696` and the Samba share
+time out. To take the access away, remove the user in the Tailscale admin console (Users),
+and delete their Jellyfin and Seerr accounts.
+
 ## Own ntfy server
 
 All pushes (rss2transmission, the start page, the disk, Prowlarr, Seerr, the weekly app

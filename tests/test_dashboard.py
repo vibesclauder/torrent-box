@@ -467,6 +467,8 @@ class NtfyCheckTest(unittest.TestCase):
         self.assertIn('data-probe="https://seerr.tail1234.ts.net/"', page)      # ready: checked from the device
         self.assertNotIn('data-probe="https://desireerr.tail1234.ts.net/"', page)
         self.assertIn("&quot;svc:desireerr&quot;", page)                        # in the policy to paste
+        self.assertIn("[&quot;autogroup:member&quot;], &quot;dst&quot;: [&quot;svc:seerr&quot;]", page)
+        self.assertNotIn("autogroup:member&quot;], &quot;dst&quot;: [&quot;svc:torrent-box", page)  # members: Seerr only
         self.assertIn("now: tag:server", page)
         self.assertIn("isn't set up", db.render_tailscale({"hostname": "box", "checks": {}}))
 
