@@ -364,8 +364,8 @@ to it):
   nCore through Prowlarr, pick a release by your quality/language rules, send it to
   Transmission, and when it's done hardlink it, renamed, into the library
   (`SERIES/HD/HU/<Show>/Season 01/...`, `MOVIES/HD/HU/<Movie (year)>/...`). The download
-  itself stays in `downloads/series` or `downloads/movies` and keeps seeding; a hardlink takes
-  no extra space. Requests nCore doesn't have yet stay open and are grabbed when they appear.
+  itself stays in `downloads/series` or `downloads/movies` and seeds until nCore's rule is met;
+  a hardlink takes no extra space. Requests nCore doesn't have yet stay open and are grabbed when they appear.
 - **Prowlarr** `:9696`: logs in to nCore and serves its search to Sonarr and Radarr. Its own
   search page can also send anything (music, games...) straight to Transmission (into `MISC`).
 
@@ -373,15 +373,15 @@ Setup also does what you'd otherwise click through, with the Transmission login 
 
 - **logins:** Prowlarr, Sonarr and Radarr get a login page, from every address (the apps
   reach each other with API keys). Seerr's admin is your Jellyfin admin account.
-- **Transmission** as the download client in all three; torrents keep seeding after import.
+- **Transmission** as the download client in all three; torrents seed on after import.
 - **Prowlarr ↔ Sonarr/Radarr**, so indexers are synced to them, and the HD series/movie
   folders from `[routes]` as their root folders (Seerr requests go to the Hungarian ones).
 - **nCore** in Prowlarr, with your nCore login (asked once, kept in `secrets.ini`). No seed
-  limits in Transmission: downloads keep seeding while the library has their files
-  (hardlinked, so it costs nothing). When a release is replaced or deleted in Sonarr/Radarr/
-  Whisparr, rss2transmission removes its download once nCore's rule is met (ratio 2, or
-  50 h + 0.4 h per GB; `[cleanup]` in config.ini). With `minimal_seed = yes` every download
-  leaves Transmission once that rule is met, even while the library has it.
+  limits in Transmission: rss2transmission removes every download once nCore's rule is met
+  (ratio 2, or 50 h + 0.4 h per GB; `[cleanup]` in config.ini), the library keeping its
+  hardlinked files. With `minimal_seed = no`, downloads seed on while the library has their
+  files (hardlinked, so it costs nothing), and only go once a release is replaced or deleted
+  in Sonarr/Radarr/Whisparr.
 - **HUN:** a custom format in Sonarr and Radarr matching `HUN` (or `2xHUN`, …) in the release name, scored
   +100 in every quality profile, so a Hungarian release wins over an equal English one.
 - **Seerr:** signed in with Jellyfin, movie and show libraries enabled, Sonarr and Radarr
@@ -554,8 +554,8 @@ One run:
 4. asks Transmission which downloads finished since the last run,
 5. with Sonarr/Radarr/Whisparr: removes their downloads that the library no longer has
    (replaced by a better release, or deleted there), files included, once seeding is done
-   (see `[cleanup]`); with `minimal_seed = yes`, removes every download from Transmission
-   as soon as nCore's rule is met (files kept outside the arr downloads folder),
+   (see `[cleanup]`); with `minimal_seed` (on by default), removes every download from
+   Transmission as soon as nCore's rule is met (files kept outside the arr downloads folder),
 6. checks free space on the storage disk,
 7. pushes a summary to your phone via [ntfy](https://ntfy.sh): torrents added, downloads
    finished, downloads removed, and (at most daily) disk-full / disk-not-mounted warnings.

@@ -100,7 +100,7 @@ Each run (the program always does one run and exits; the timer repeats it), in o
    `delete-local-data`, one low-priority push for the run. A file that can't be stat'ed →
    nothing decided this run. Never imported (failed / manual import pending) → never removed.
    Skipped when the disk isn't mounted.
-   `minimal_seed = yes` (arr or not): every finished torrent that met the rule goes — an
+   `minimal_seed = yes` (the default; arr or not): every finished torrent that met the rule goes — an
    imported arr download with `delete-local-data` (the library keeps its hardlinks; nothing
    freed), anything outside `<storage_root>/downloads` without it (those files are the
    library). A never-imported arr download still stays. The push says "files kept" for those.

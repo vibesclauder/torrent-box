@@ -570,9 +570,8 @@ def ncore_status(prowlarr, state):
 def ensure_ncore(prowlarr, user, password, code, state):
     """The nCore indexer (Cardigann definition "ncore"). Added once; an existing one that
     worked is never touched, since saving it again would log in with an old 2FA code. One
-    whose first login failed is switched on with this code. No seed limits: Transmission
-    keeps seeding, and rss2transmission removes what the library let go of once nCore's rule
-    is met ([cleanup] in config.ini).
+    whose first login failed is switched on with this code. No seed limits in Transmission:
+    rss2transmission removes downloads once nCore's rule is met ([cleanup] in config.ini).
 
     Added switched off, then switched on with the code: Prowlarr only keeps the session
     cookies of a login made for a saved indexer (one with an id), so logging in while adding
@@ -647,7 +646,7 @@ def arr_connect(apis, keys, rpc_user, rpc_password, downloads_dir, misc_dir, ser
         prefix = client_prefix(apis[name])
         result = ensure_item(apis[name], "downloadclient", CLIENT_NAME, "Transmission", dict(
             tr, **{f"{prefix}Category": "", f"{prefix}Directory": f"{downloads_dir}/{sub}"}),
-            # the torrent keeps seeding after the import (hardlinked, so it costs nothing)
+            # the torrent seeds on after the import; rss2transmission removes it ([cleanup])
             extra={"removeCompletedDownloads": False}, force=new_login)
         yield f"{name}: download client {CLIENT_NAME}: {result}"
         for path in ensure_root_folders(apis[name], roots):

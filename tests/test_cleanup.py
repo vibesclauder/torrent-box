@@ -43,7 +43,11 @@ class CleanupCase(RunCase):
 
 class CleanupTest(CleanupCase):
     """Sonarr/Radarr/Whisparr downloads are removed once the library let go of them and
-    seeding is done; nothing else is."""
+    seeding is done; nothing else is. (With minimal_seed off: see MinimalSeedTest for on.)"""
+
+    def run_once(self, *args, **changes):
+        changes.setdefault("minimal_seed", False)
+        return super().run_once(*args, **changes)
 
     def test_replaced_movie_is_removed_once_seeded(self):
         t, folder, h = self.download("Crank.II.2009.1080p.Remux", seeded_h=10)
@@ -195,53 +199,58 @@ class CleanupTest(CleanupCase):
 
 
 class MinimalSeedTest(CleanupCase):
-    """minimal_seed: every download leaves Transmission once seeding is done."""
+    """minimal_seed (on by default): every download leaves Transmission once seeding is done."""
 
     def test_imported_goes_with_files_once_seeded(self):
         t, folder, h = self.download("Kept", seeded_h=10)
         library = self.link(folder, "movie.mkv")
-        self.arr_run(minimal_seed=True)
+        self.arr_run()
         self.assertEqual(self.server.removed, [])
         t["uploadRatio"] = 2.0
-        self.arr_run(minimal_seed=True)
+        self.arr_run()
         self.assertEqual(self.server.removed, [(h, True)])
         self.assertEqual(self.server.pushes[-1]["message"], "files kept, ratio 2.00, seeded 10 h")
         self.assertTrue(library[0].exists())
 
     def test_never_imported_still_stays(self):
         self.download("Failed.Import", ratio=5, seeded_h=500)
-        self.arr_run(minimal_seed=True)
+        self.arr_run()
         self.assertEqual(self.server.removed, [])
 
     def test_outside_arr_downloads_keeps_files(self):
         _, folder, h = self.download("Rss.Movie", ratio=0.5, seeded_h=60, size=1_000_000_000,
                                      folder="MOVIES/HD/HU")
-        self.run_once(minimal_seed=True)     # arr = no: 50.4 h needed
+        self.run_once()                      # arr = no: 50.4 h needed
         self.assertEqual(self.server.removed, [(h, False)])
         self.assertTrue((folder / "movie.mkv").exists())
 
     def test_mixed_push(self):
         _, folder, _ = self.download("F", ratio=3, size=5_000_000_000)
         library = self.link(folder, "movie.mkv")
-        self.arr_run()
+        self.arr_run(minimal_seed=False)  # imported, but not removed yet
         library[0].unlink()
         self.download("Rss", ratio=3, folder="MOVIES/HD/HU")
-        self.arr_run(minimal_seed=True, notify_downloaded=False)
+        self.arr_run(notify_downloaded=False)
         self.assertEqual(self.server.pushes[-1]["title"],
                          "2 seeded downloads removed, 4.7 GB freed")
         self.download("Rss2", ratio=3, folder="MOVIES/HD/EN")
         self.download("Rss3", ratio=3, folder="MOVIES/HD/EN")
-        self.arr_run(minimal_seed=True, notify_downloaded=False)
+        self.arr_run(notify_downloaded=False)
         self.assertEqual(self.server.pushes[-1]["title"], "2 seeded downloads removed")
 
     def test_not_yet_seeded_stays(self):
         self.download("Rss", ratio=1, seeded_h=20, folder="MOVIES/HD/HU")
-        self.run_once(minimal_seed=True)
+        self.run_once()
+        self.assertEqual(self.server.removed, [])
+
+    def test_off_keeps_seeding(self):
+        self.download("Rss", ratio=3, folder="MOVIES/HD/HU")
+        self.run_once(minimal_seed=False)
         self.assertEqual(self.server.removed, [])
 
     def test_dry_run_removes_nothing(self):
         self.download("Rss", ratio=3, folder="MOVIES/HD/HU")
-        report = self.run_once(minimal_seed=True, dry_run=True)
+        report = self.run_once(dry_run=True)
         self.assertEqual((self.server.removed, report.removed), ([], []))
 
 
