@@ -100,6 +100,10 @@ Each run (the program always does one run and exits; the timer repeats it), in o
    `delete-local-data`, one low-priority push for the run. A file that can't be stat'ed →
    nothing decided this run. Never imported (failed / manual import pending) → never removed.
    Skipped when the disk isn't mounted.
+   `minimal_seed = yes` (arr or not): every finished torrent that met the rule goes — an
+   imported arr download with `delete-local-data` (the library keeps its hardlinks; nothing
+   freed), anything outside `<storage_root>/downloads` without it (those files are the
+   library). A never-imported arr download still stays. The push says "files kept" for those.
 6. **Disk space:** `shutil.disk_usage(storage_root)`, percent computed and rounded up like
    `df`'s Use%; at/above `disk_warn_percent` → warning push, at most once per 24 h while it
    lasts (timestamp in state; cleared when it drops below, so the next crossing warns at once).
