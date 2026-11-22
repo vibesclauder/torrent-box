@@ -532,7 +532,10 @@ pushing them:
 | (nothing) | which of them runs now |
 
 The start page's Desireerr tile says when it isn't the release (`edge`, `local 26c5293+` for a
-checkout, the `+` for uncommitted changes, or `dev`). Its admin is the login all the apps share (and follows
+checkout, the `+` for uncommitted changes, or `dev`). An admin can also pick release or edge in
+Desireerr's own Settings (Updates): it leaves the choice in its data folder, and the next
+update check (within the hour) puts it in effect. A checkout running instead is changed only
+with the commands above. Its admin is the login all the apps share (and follows
 it when it changes). It browses StashDB with your API key (stashdb.org, your profile):
 setup takes it from Whisparr's StashDB import list if there is one, otherwise asks once (or
 `STASHDB_KEY`), and keeps it in `secrets.ini` as `stashdb_key`. Skipped, Desireerr asks for
@@ -592,7 +595,9 @@ ones that got one, then pushes which (low priority), or that the
 update failed. A box that was off then catches up when it starts. In between,
 `torrent-box-arr-update-check.timer` asks the apps every hour whether a new version is out
 (the *arr apps' "New update is available" health check, Seerr's status) and updates just
-those: their image often comes out a few hours after the release, so it tries again each hour
+those (Desireerr: when its image's digest on GitHub isn't the one pulled, release or edge, so
+a push to `dev` is on an edge box within the hour): their image often comes out a few hours
+after the release, so it tries again each hour
 until it's there, and pushes once one is running (its failures go only to `journalctl -u
 torrent-box-arr-update-check`; the weekly run pushes them). `[setup] arr_auto_update =
 no` (and a setup run) switches it off; then update by hand:

@@ -1313,10 +1313,10 @@ class PageTest(unittest.TestCase):
                  ('{"setup_needed": true, "version": "0.1.0"}', db.WARN, "waiting for its first sign-in")]
         for body, state, summary in cases:
             with mock.patch.object(db, "http_get", lambda url, body=body: body.encode()):
-                r = db.check_desireerr({})
+                r = db.check_desireerr({}, "/nonexistent")  # not this box's .env
             self.assertEqual((r["state"], r["summary"]), (state, summary))
         with mock.patch.object(db, "http_get", side_effect=ConnectionRefusedError(111, "refused")):
-            self.assertEqual(db.check_desireerr({})["state"], db.DOWN)
+            self.assertEqual(db.check_desireerr({}, "/nonexistent")["state"], db.DOWN)
 
     def test_desireerr_check_says_which_build(self):
         with tempfile.TemporaryDirectory() as arr, \

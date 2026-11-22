@@ -4,7 +4,8 @@
 # main), updated every week by arr-update. `./setup_helper.py desireerr edge` follows its dev
 # branch instead (experimental), `local|dev` runs a build of your checkout, or your checkout's
 # code as it is (`release`: back); .env beside this file says which (DESIREERR_IMAGE,
-# DESIREERR_BUILD, DESIREERR_CODE). It writes the scenes'
+# DESIREERR_BUILD, DESIREERR_CODE). An admin can pick release or edge in Desireerr's Settings
+# too: it writes desireerr/data/update-channel, which arr-update puts in the .env. It writes the scenes'
 # .nfo files beside them, so it sees the storage disk at Whisparr's path, and reads Whisparr's
 # API key from its config folder.
   desireerr:
@@ -16,6 +17,7 @@
     user: "@PUID@:@PGID@"
     environment:
       DESIREERR_WHISPARR_CONFIG: /whisparr/config.xml
+      DESIREERR_IMAGE: ${DESIREERR_IMAGE:-ghcr.io/vibesclauder/desireerr:latest}  # its Settings show the channel
     volumes:
       - @ARR_DIR@/desireerr/data:/data
       - @ARR_DIR@/desireerr/cache:/cache

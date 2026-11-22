@@ -1356,6 +1356,9 @@ esac
         (tmp / "docker").write_text(f"""#!/bin/bash
 case "$*" in
   *"config --services") cat {tmp}/services ;;
+  "buildx imagetools inspect "*) echo "Name: $4"; echo "Digest:      sha256:$(cat {tmp}/remote 2>/dev/null)"
+    echo "$4" >>{tmp}/inspected ;;
+  "image inspect -f {{{{range .RepoDigests}}}}{{{{.}}}} {{{{end}}}} "*) echo "x/desireerr@sha256:$(cat {tmp}/local 2>/dev/null) " ;;
   *"pull --quiet"*) echo "$*" >>{tmp}/calls; [[ -z $PULL_FAILS ]] ;;
   *"up -d"*) echo "$*" >>{tmp}/calls; [[ ! -f {tmp}/pulled ]] || cp {tmp}/pulled {tmp}/images ;;
   inspect*) grep "^${{@: -1}}=" {tmp}/images | cut -d= -f2 ;;
@@ -1428,6 +1431,59 @@ esac
         self.assertIn("pull --quiet sonarr radarr", self.calls()[0])  # no image to pull for it
         self.assertFalse(self.calls()[0].endswith("desireerr"), self.calls())
         self.assertIn("desireerr: a build of your checkout runs; not pulled", result.stdout)
+
+    def test_if_outdated_new_desireerr_image(self):
+        tmp = self.with_desireerr()
+        self.outdated()
+        (tmp / "local").write_text("aaa")
+        (tmp / "remote").write_text("bbb")
+        (tmp / "pulled").write_text("sonarr=sha256:a\nradarr=sha256:b\ndesireerr=sha256:NEW\n")
+        result, pushes = self.run_update(False, "--if-outdated")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((tmp / "inspected").read_text(), "ghcr.io/vibesclauder/desireerr:latest\n")
+        self.assertTrue(all(c.endswith(" desireerr") for c in self.calls()), self.calls())
+        self.assertEqual(pushes, "Apps updated|New versions running: desireerr\n")
+
+    def test_if_outdated_desireerr_up_to_date(self):
+        tmp = self.with_desireerr()
+        self.outdated()
+        (tmp / "local").write_text("aaa")
+        (tmp / "remote").write_text("aaa")
+        result, pushes = self.run_update(False, "--if-outdated")
+        self.assertEqual((result.returncode, result.stdout, pushes, self.calls()), (0, "", "", []))
+
+    def test_if_outdated_desireerr_edge_and_local(self):
+        tmp = self.with_desireerr()
+        self.outdated()
+        (tmp / "local").write_text("aaa")
+        (tmp / "remote").write_text("bbb")
+        (tmp / ".env").write_text("DESIREERR_IMAGE=ghcr.io/vibesclauder/desireerr:dev\n")
+        self.run_update(False, "--if-outdated")
+        self.assertEqual((tmp / "inspected").read_text(), "ghcr.io/vibesclauder/desireerr:dev\n")
+        (tmp / ".env").write_text("DESIREERR_BUILD=local:26c5293+\nDESIREERR_IMAGE=torrent-box/desireerr\n")
+        (tmp / "calls").unlink(missing_ok=True)
+        result, _ = self.run_update(False, "--if-outdated")
+        self.assertEqual((result.stdout, self.calls()), ("", []))  # no registry for a local build
+
+    def test_channel_from_desireerr_settings(self):
+        tmp = self.with_desireerr()
+        self.outdated()
+        (tmp / "local").write_text("aaa")
+        (tmp / "remote").write_text("aaa")  # nothing new on its tag
+        (tmp / "desireerr" / "data").mkdir(parents=True)
+        (tmp / "desireerr" / "data" / "update-channel").write_text("edge\n")
+        (tmp / "pulled").write_text("sonarr=sha256:a\nradarr=sha256:b\ndesireerr=sha256:NEW\n")
+        result, pushes = self.run_update(False, "--if-outdated")  # the channel changed: pulled anyway
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((tmp / ".env").read_text(), "DESIREERR_IMAGE=ghcr.io/vibesclauder/desireerr:dev\n")
+        self.assertTrue(all(c.endswith(" desireerr") for c in self.calls()) and self.calls(), self.calls())
+        (tmp / "desireerr" / "data" / "update-channel").write_text("release\n")
+        self.run_update()  # weekly: back to the release
+        self.assertEqual((tmp / ".env").read_text(), "")
+        (tmp / "desireerr" / "data" / "update-channel").write_text("edge\n")
+        (tmp / ".env").write_text("DESIREERR_CODE=/home/me/desireerr\n")  # a checkout runs: left alone
+        self.run_update()
+        self.assertEqual((tmp / ".env").read_text(), "DESIREERR_CODE=/home/me/desireerr\n")
 
     def test_if_outdated_failure_not_pushed(self):
         self.outdated("sonarr")
@@ -1614,13 +1670,17 @@ class DesireerrSwitchTest(unittest.TestCase):
         self.assertEqual(self.calls, [compose + ["pull", "desireerr"], compose + ["up", "-d", "desireerr"]])
 
     def test_edge_and_back(self):
+        channel = self.arr / "desireerr" / "data" / "update-channel"
+        channel.parent.mkdir(parents=True)  # Desireerr's data folder: its Settings show what's wanted
         self.assertEqual(self.switch("edge"), 0)
+        self.assertEqual(channel.read_text(), "edge\n")
         self.assertEqual(self.env(), "DESIREERR_IMAGE=ghcr.io/vibesclauder/desireerr:dev\n")
         self.assertEqual([c[-2:] for c in self.calls], [["pull", "desireerr"], ["-d", "desireerr"]])
         self.switch("status")
         self.assertIn("dev branch", self.said[-1])
         self.assertEqual(self.switch("github"), 0)  # release's old name
         self.assertEqual(self.env(), "")
+        self.assertEqual(channel.read_text(), "release\n")
 
     def test_dev_after_local_drops_the_local_image(self):
         self.switch("local", self.checkout)
