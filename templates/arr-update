@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # torrent-box: update the Docker apps (Prowlarr, Sonarr, Radarr, Seerr, Whisparr) to their newest
-# images (Desireerr's too: its latest release, or its dev branch's image when the .env says so
-# or an admin picked it in its Settings; not while a build of your checkout runs, see
+# images (Desireerr's too: its latest release, or its dev branch's image when the .env says so;
+# not while a build of your checkout runs, see
 # setup_helper.py desireerr). Run weekly by
 # torrent-box-arr-update.timer; pushes which apps were updated, or that it
 # failed. With --if-outdated (hourly, torrent-box-arr-update-check.timer) only the apps that
@@ -57,25 +57,6 @@ outdated() {
 arr_dir=$(dirname "$compose_file")
 desireerr_repo=ghcr.io/vibesclauder/desireerr
 
-# The channel an admin picked in Desireerr's Settings (release or edge, a file in its data
-# folder) goes into the .env, unless a checkout runs. Says "desireerr" when that changed what
-# runs, so it's pulled again.
-sync_channel() {
-    local env=$arr_dir/.env want have
-    grep -q '^DESIREERR_BUILD=local:\|^DESIREERR_CODE=.' "$env" 2>/dev/null && return 0
-    want=$(head -1 "$arr_dir/desireerr/data/update-channel" 2>/dev/null | tr -d '[:space:]')
-    have=$(sed -n 's/^DESIREERR_IMAGE=//p' "$env" 2>/dev/null | tail -1)
-    case $want in
-        edge) [[ $have != "$desireerr_repo:dev" ]] || return 0 ;;
-        release) [[ -n $have ]] || return 0 ;;
-        *) return 0 ;;
-    esac
-    [[ ! -f $env ]] || sed -i '/^DESIREERR_IMAGE=/d' "$env"
-    if [[ $want == edge ]]; then echo "DESIREERR_IMAGE=$desireerr_repo:dev" >>"$env"; fi
-    [[ ! -f $env ]] || chown --reference="$compose_file" "$env" 2>/dev/null || true
-    echo desireerr
-}
-
 # Desireerr says a newer image is out when the registry's digest for the tag it runs isn't
 # one it pulled.
 desireerr_outdated() {
@@ -94,11 +75,10 @@ if exec 9>>"${TORRENT_BOX_LOCK:-/run/lock/torrent-box-arr-update}"; then flock 9
 
 services=$(compose config --services) || fail "can't read $compose_file"
 if [[ -n $if_outdated ]]; then
-    services=$({ sync_channel; outdated; } | sort -u | paste -sd ' ')
+    services=$(outdated | paste -sd ' ')
     [[ -n $services ]] || exit 0
     echo "a new version is out: $services"
 fi
-[[ -n $if_outdated ]] || sync_channel >/dev/null
 before=$(images)
 # A build of your checkout runs as Desireerr: there's no image of that name to pull
 pull=$services

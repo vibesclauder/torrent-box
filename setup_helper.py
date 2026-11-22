@@ -1478,10 +1478,7 @@ def cmd_desireerr(mode, checkout=None, arr_dir=ARR_DIR, run=subprocess.run, out=
         edge = mode == "edge"
         write_env(env_file, DESIREERR_IMAGE=DESIREERR_EDGE_IMAGE if edge else None,
                   DESIREERR_BUILD=None, DESIREERR_CODE=None)
-    if pull:  # what Desireerr's Settings show as the wanted channel
-        channel_file = arr_dir / "desireerr" / "data" / "update-channel"
-        if channel_file.parent.is_dir():
-            channel_file.write_text("edge\n" if mode == "edge" else "release\n", encoding="utf-8")
+    if pull:
         run(compose + ["pull", "desireerr"], check=True)
     run(compose + ["up", "-d", "desireerr"], check=True)
     if mode == "local":

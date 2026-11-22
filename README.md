@@ -532,10 +532,7 @@ pushing them:
 | (nothing) | which of them runs now |
 
 The start page's Desireerr tile says when it isn't the release (`edge`, `local 26c5293+` for a
-checkout, the `+` for uncommitted changes, or `dev`). An admin can also pick release or edge in
-Desireerr's own Settings (Updates): it leaves the choice in its data folder, and the next
-update check (within the hour) puts it in effect. A checkout running instead is changed only
-with the commands above. Its admin is the login all the apps share (and follows
+checkout, the `+` for uncommitted changes, or `dev`). Its admin is the login all the apps share (and follows
 it when it changes). It browses StashDB with your API key (stashdb.org, your profile):
 setup takes it from Whisparr's StashDB import list if there is one, otherwise asks once (or
 `STASHDB_KEY`), and keeps it in `secrets.ini` as `stashdb_key`. Skipped, Desireerr asks for
