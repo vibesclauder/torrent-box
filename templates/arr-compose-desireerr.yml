@@ -16,6 +16,7 @@
     user: "@PUID@:@PGID@"
     environment:
       DESIREERR_WHISPARR_CONFIG: /whisparr/config.xml
+      DESIREERR_FRAME_ANCESTORS: same-host  # the start page frames it, from another port or name
     volumes:
       - @ARR_DIR@/desireerr/data:/data
       - @ARR_DIR@/desireerr/cache:/cache
