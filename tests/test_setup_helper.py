@@ -1356,9 +1356,6 @@ esac
         (tmp / "docker").write_text(f"""#!/bin/bash
 case "$*" in
   *"config --services") cat {tmp}/services ;;
-  "buildx version") ;;
-  "build -q -t torrent-box/desireerr --provenance=false --pull https://x/desireerr.git#main")
-    echo "$*" >>{tmp}/calls; [[ ! -f {tmp}/build-fails ]] ;;
   *"pull --quiet"*) echo "$*" >>{tmp}/calls; [[ -z $PULL_FAILS ]] ;;
   *"up -d"*) echo "$*" >>{tmp}/calls; [[ ! -f {tmp}/pulled ]] || cp {tmp}/pulled {tmp}/images ;;
   inspect*) grep "^${{@: -1}}=" {tmp}/images | cut -d= -f2 ;;
@@ -1413,19 +1410,14 @@ esac
         tmp = Path(self.tmpdir.name)
         (tmp / "services").write_text("sonarr\nradarr\ndesireerr\n")
         (tmp / "images").write_text("sonarr=sha256:a\nradarr=sha256:b\ndesireerr=sha256:c\n")
-        (tmp / "compose.yml").write_text("services:\n  desireerr:\n    build:  # by docker build\n"
-                                         "      context: https://x/desireerr.git#main\n")
         return tmp
 
-    def test_desireerr_built_again(self):
+    def test_desireerr_pulled_with_the_others(self):
         tmp = self.with_desireerr()
         (tmp / "pulled").write_text("sonarr=sha256:a\nradarr=sha256:b\ndesireerr=sha256:NEW\n")
         result, pushes = self.run_update()
         self.assertEqual(result.returncode, 0, result.stderr)
-        calls = self.calls()
-        self.assertEqual(calls[0], "build -q -t torrent-box/desireerr --provenance=false --pull "
-                                   "https://x/desireerr.git#main")  # the same build each time
-        self.assertIn("pull --quiet --ignore-buildable sonarr radarr desireerr", calls[1])
+        self.assertIn("pull --quiet sonarr radarr desireerr", self.calls()[0])
         self.assertEqual(pushes, "Apps updated|New versions running: desireerr\n")
 
     def test_desireerr_local_build_left_alone(self):
@@ -1433,24 +1425,9 @@ esac
         (tmp / ".env").write_text("DESIREERR_BUILD=local:26c5293+\n")
         result, pushes = self.run_update()
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertFalse(any(" build " in c for c in self.calls()), self.calls())
-        self.assertIn("desireerr: a build of your checkout runs; not rebuilt", result.stdout)
-
-    def test_desireerr_build_failure_pushed_others_updated(self):
-        tmp = self.with_desireerr()
-        (tmp / "build-fails").write_text("")
-        (tmp / "pulled").write_text("sonarr=sha256:NEW\nradarr=sha256:b\ndesireerr=sha256:c\n")
-        result, pushes = self.run_update()
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("Desireerr update failed|Couldn't build its image", pushes)
-        self.assertIn("Apps updated|New versions running: sonarr", pushes)
-
-    def test_if_outdated_doesnt_build_desireerr(self):
-        self.with_desireerr()
-        self.outdated("radarr")
-        result, _ = self.run_update(False, "--if-outdated")
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertFalse(any(" build " in c for c in self.calls()), self.calls())
+        self.assertIn("pull --quiet sonarr radarr", self.calls()[0])  # no image to pull for it
+        self.assertFalse(self.calls()[0].endswith("desireerr"), self.calls())
+        self.assertIn("desireerr: a build of your checkout runs; not pulled", result.stdout)
 
     def test_if_outdated_failure_not_pushed(self):
         self.outdated("sonarr")
@@ -1578,7 +1555,7 @@ class DesireerrSwitchTest(unittest.TestCase):
         self.arr = Path(self.tmpdir.name) / "arr"
         self.arr.mkdir()
         (self.arr / "compose.yml").write_text("services:\n  whisparr:\n    image: x\n  desireerr:\n"
-                                              "    build:\n      context: https://x/d.git#main\n")
+                                              "    image: ${DESIREERR_IMAGE:-x/d:latest}\n")
         self.checkout = Path(self.tmpdir.name) / "desireerr"
         self.checkout.mkdir()
         for name in ("desireerr.py", "Dockerfile"):
@@ -1608,7 +1585,8 @@ class DesireerrSwitchTest(unittest.TestCase):
         sh.write_env(path, DESIREERR_CODE=None, DESIREERR_BUILD="local:abc")
         self.assertEqual(path.read_text(), "# mine\nOTHER=1\nDESIREERR_BUILD=local:abc\n")
         self.assertEqual(sh.read_env(path), {"OTHER": "1", "DESIREERR_BUILD": "local:abc"})
-        self.assertEqual(sh.desireerr_build({}), ("github", ""))
+        self.assertEqual(sh.desireerr_build({}), ("release", ""))
+        self.assertEqual(sh.desireerr_build({"DESIREERR_IMAGE": sh.DESIREERR_EDGE_IMAGE}), ("edge", ""))
         self.assertEqual(sh.desireerr_build({"DESIREERR_BUILD": "local:abc"}), ("local", "abc"))
         self.assertEqual(sh.desireerr_build({"DESIREERR_CODE": "/c", "DESIREERR_BUILD": "local:a"}),
                          ("dev", "/c"))
@@ -1618,24 +1596,36 @@ class DesireerrSwitchTest(unittest.TestCase):
         self.assertIn(["docker", "build", "-q", "-t", "torrent-box/desireerr", "--provenance=false",
                        str(self.checkout)], self.calls)
         self.assertEqual(self.calls[-1][-3:], ["up", "-d", "desireerr"])
-        self.assertEqual(self.env(), "DESIREERR_BUILD=local:26c5293+\n")  # + : changes not committed
+        self.assertEqual(self.env(), "DESIREERR_IMAGE=torrent-box/desireerr\n"
+                                     "DESIREERR_BUILD=local:26c5293+\n")  # + : changes not committed
         self.assertIn("weekly updates skip it", self.said[-1])
         self.switch("status")
         self.assertIn(f"a build of your checkout at 26c5293+", self.said[-1])
 
-    def test_dev_then_back_to_github(self):
+    def test_dev_then_back_to_release(self):
         self.assertEqual(self.switch("dev", self.checkout), 0)
         self.assertEqual(self.env(), f"DESIREERR_CODE={self.checkout}\n")
         self.assertFalse(any(c[1] == "build" for c in self.calls))  # the code as it is: no build
         self.assertIn("docker restart desireerr", self.said[-1])
         self.calls.clear()
-        self.assertEqual(self.switch("github"), 0)
+        self.assertEqual(self.switch("release"), 0)
         self.assertEqual(self.env(), "")
         compose = ["docker", "compose", "-f", str(self.arr / "compose.yml")]
-        self.assertEqual(self.calls, [["docker", "buildx", "version"],
-                                      ["docker", "build", "-q", "-t", "torrent-box/desireerr",
-                                       "--provenance=false", "https://x/d.git#main"],
-                                      compose + ["up", "-d", "desireerr"]])
+        self.assertEqual(self.calls, [compose + ["pull", "desireerr"], compose + ["up", "-d", "desireerr"]])
+
+    def test_edge_and_back(self):
+        self.assertEqual(self.switch("edge"), 0)
+        self.assertEqual(self.env(), "DESIREERR_IMAGE=ghcr.io/vibesclauder/desireerr:dev\n")
+        self.assertEqual([c[-2:] for c in self.calls], [["pull", "desireerr"], ["-d", "desireerr"]])
+        self.switch("status")
+        self.assertIn("dev branch", self.said[-1])
+        self.assertEqual(self.switch("github"), 0)  # release's old name
+        self.assertEqual(self.env(), "")
+
+    def test_dev_after_local_drops_the_local_image(self):
+        self.switch("local", self.checkout)
+        self.switch("dev", self.checkout)
+        self.assertEqual(self.env(), f"DESIREERR_CODE={self.checkout}\n")
 
     def test_refusals(self):
         self.assertEqual(self.switch("local", self.tmpdir.name), 1)  # not a checkout

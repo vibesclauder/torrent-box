@@ -693,9 +693,9 @@ def check_seerr(s):
 
 
 def desireerr_build(arr_dir):
-    """What runs as Desireerr, when it isn't the build of its GitHub repo: "local 26c5293+"
-    (a build of a checkout), "dev" (a checkout's code), else "". From the .env beside the
-    apps' compose.yml (setup_helper.py desireerr)."""
+    """What runs as Desireerr, when it isn't its newest release: "edge" (its dev branch),
+    "local 26c5293+" (a build of a checkout), "dev" (a checkout's code), else "". From the .env
+    beside the apps' compose.yml (setup_helper.py desireerr)."""
     try:
         lines = (Path(arr_dir) / ".env").read_text(encoding="utf-8").splitlines()
     except OSError:
@@ -704,13 +704,15 @@ def desireerr_build(arr_dir):
     if env.get("DESIREERR_CODE", "").strip():
         return "dev"
     build = env.get("DESIREERR_BUILD", "").strip()
-    return "local " + build[6:] if build.startswith("local:") else ""
+    if build.startswith("local:"):
+        return "local " + build[6:]
+    return "edge" if env.get("DESIREERR_IMAGE", "").strip().endswith(":dev") else ""
 
 
 def check_desireerr(s, arr_dir=DEFAULT_ARR_DIR):
     """Its own status; and whether a checkout runs instead of the GitHub build (build=...)."""
     build = desireerr_build(arr_dir)
-    note = [f"{build} build: ./setup_helper.py desireerr github goes back"] if build else []
+    note = [f"{build} build: ./setup_helper.py desireerr release goes back"] if build else []
     try:
         status = json.loads(http_get("http://127.0.0.1:5056/api/status"))
     except (OSError, ValueError) as e:

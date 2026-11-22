@@ -512,24 +512,27 @@ its Seerr: browse and search StashDB, request scenes, approve other users' reque
 performers and studios. Setup connects Whisparr like Radarr: the login, Transmission (with
 its own folder under `downloads/`), Prowlarr (which syncs it the indexers for its
 categories) and those categories' folders from `[routes]` as root folders (videos only).
-Desireerr runs in Docker beside Whisparr, but there's no registry for its image: it's built
-on the box straight from [its repo](https://github.com/vibesclauder/desireerr)'s `main` (by
-each setup run, and the weekly update below), so a push there is all a new version needs; a
-build where nothing changed is the same image, and nothing restarts. Its settings and requests
+Desireerr runs in Docker beside Whisparr, from the image GitHub Actions publishes on
+[its repo](https://github.com/vibesclauder/desireerr) (`ghcr.io/vibesclauder/desireerr`): the
+newest release, `latest`, the merges to its `main`, pulled by each setup run and the weekly
+update below. `edge` follows its `dev` branch instead, experimental, for those who want
+changes before they're released. Its settings and requests
 are in `~/.local/share/torrent-box/arr/desireerr/data`, its covers in `…/desireerr/cache`
 (`docker logs desireerr`; a box that ran it as a user unit before has its data moved there and
-the unit removed). To try changes before pushing them, `./setup_helper.py desireerr` switches
-what runs, from a Desireerr checkout (beside torrent-box's, else `~/desireerr`, or name it):
+the unit removed). `./setup_helper.py desireerr` switches what runs; the last two take a
+Desireerr checkout (beside torrent-box's, else `~/desireerr`, or name it), to try changes before
+pushing them:
 
 | `./setup_helper.py desireerr …` | Runs |
 |---|---|
+| `release` | its newest release (the default, and weekly updates) |
+| `edge` | its `dev` branch's image, experimental; the command again pulls a newer one right away |
 | `local [checkout]` | an image built from the checkout as it is (uncommitted changes too); the weekly update leaves it alone |
 | `dev [checkout]` | the checkout's code itself, no build: after a change, `docker restart desireerr` |
-| `github` | the build of its repo again (and weekly updates) |
 | (nothing) | which of them runs now |
 
-The start page's Desireerr tile says when a checkout runs (`local 26c5293+`, the `+` for
-uncommitted changes, or `dev`). Its admin is the login all the apps share (and follows
+The start page's Desireerr tile says when it isn't the release (`edge`, `local 26c5293+` for a
+checkout, the `+` for uncommitted changes, or `dev`). Its admin is the login all the apps share (and follows
 it when it changes). It browses StashDB with your API key (stashdb.org, your profile):
 setup takes it from Whisparr's StashDB import list if there is one, otherwise asks once (or
 `STASHDB_KEY`), and keeps it in `secrets.ini` as `stashdb_key`. Skipped, Desireerr asks for
@@ -584,7 +587,7 @@ LG and Samsung TVs (not in LG's store: the `.ipk` is sideloaded, e.g. with the w
 `ares-install` or webOS Homebrew) with Seerr search built in, via its own server plugin.
 
 **Updates:** every Monday around 04:30 `torrent-box-arr-update.timer` pulls the apps' newest
-images (Desireerr's: built again from its repo, unless a `local` build runs) and restarts the
+images (Desireerr's too: its release, or `edge`, unless a `local` build runs) and restarts the
 ones that got one, then pushes which (low priority), or that the
 update failed. A box that was off then catches up when it starts. In between,
 `torrent-box-arr-update-check.timer` asks the apps every hour whether a new version is out
@@ -593,8 +596,8 @@ those: their image often comes out a few hours after the release, so it tries ag
 until it's there, and pushes once one is running (its failures go only to `journalctl -u
 torrent-box-arr-update-check`; the weekly run pushes them). `[setup] arr_auto_update =
 no` (and a setup run) switches it off; then update by hand:
-`sudo docker compose -f ~/.local/share/torrent-box/arr/compose.yml pull --ignore-buildable`,
-the same with `build --pull` (Desireerr), then with `up -d`. Right away: `sudo systemctl start torrent-box-arr-update`; what it did: `journalctl
+`sudo docker compose -f ~/.local/share/torrent-box/arr/compose.yml pull`, then the same with
+`up -d`. Right away: `sudo systemctl start torrent-box-arr-update`; what it did: `journalctl
 -u torrent-box-arr-update`. With `arr = no` setup stops the apps (their config stays for
 switching back on).
 

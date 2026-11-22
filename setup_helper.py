@@ -1363,13 +1363,16 @@ def rpc_check(url, user, password, timeout=10):
 
 ### Desireerr: which build runs
 
-# Desireerr's container (templates/arr-compose-desireerr.yml) runs the image built from its
-# GitHub repo, a build of your checkout ("local"), or your checkout's code as it is ("dev").
-# Which one: in .env beside compose.yml, which Compose reads for ${DESIREERR_CODE} (and
-# arr-update and the start page for DESIREERR_BUILD).
+# Desireerr's container (templates/arr-compose-desireerr.yml) runs an image GitHub Actions
+# publishes from its repo: the newest release ("release", main), the dev branch's ("edge",
+# experimental), a build of your checkout ("local"), or your checkout's code as it is ("dev").
+# Which one: in .env beside compose.yml, which Compose reads for ${DESIREERR_IMAGE} and
+# ${DESIREERR_CODE} (and arr-update and the start page for DESIREERR_BUILD).
 ARR_DIR = Path("~/.local/share/torrent-box/arr").expanduser()  # setup.sh's ARR_DIR
-DESIREERR_IMAGE = "torrent-box/desireerr"
-DESIREERR_MODES = ("status", "github", "local", "dev")
+DESIREERR_IMAGE = "torrent-box/desireerr"  # the local build's name
+DESIREERR_RELEASE_IMAGE = "ghcr.io/vibesclauder/desireerr:latest"
+DESIREERR_EDGE_IMAGE = "ghcr.io/vibesclauder/desireerr:dev"
+DESIREERR_MODES = ("status", "release", "edge", "local", "dev", "github")  # github: release's old name
 
 
 def read_env(path):
@@ -1395,12 +1398,14 @@ def write_env(path, **values):
 
 
 def desireerr_build(env):
-    """What the .env says Desireerr runs: ("github" | "local" | "dev", what exactly)."""
+    """What the .env says Desireerr runs: ("release" | "edge" | "local" | "dev", what exactly)."""
     if env.get("DESIREERR_CODE"):
         return "dev", env["DESIREERR_CODE"]
     if env.get("DESIREERR_BUILD", "").startswith("local:"):
         return "local", env["DESIREERR_BUILD"][6:]
-    return "github", ""
+    if env.get("DESIREERR_IMAGE") == DESIREERR_EDGE_IMAGE:
+        return "edge", ""
+    return "release", ""
 
 
 def default_checkout():
@@ -1419,18 +1424,12 @@ def checkout_version(path, run=subprocess.run):
 
 
 def desireerr_build_command(docker, source, run=subprocess.run):
-    """docker build for Desireerr's image, as setup.sh and arr-update build it: without buildx's
-    provenance (new on every build), so the same source makes the same image."""
+    """docker build for the image of a checkout, without buildx's provenance (new on every
+    build), so the same source makes the same image."""
     cmd = docker + ["build", "-q", "-t", DESIREERR_IMAGE]
     if run(docker + ["buildx", "version"], capture_output=True).returncode == 0:
         cmd.append("--provenance=false")
     return cmd + [str(source)]
-
-
-def compose_context(compose_text):
-    """The build context in compose.yml (Desireerr's repo), or ""."""
-    m = re.search(r"^\s*context:\s*(\S+)", compose_text, re.M)
-    return m[1] if m else ""
 
 
 def docker_command():
@@ -1448,9 +1447,11 @@ def cmd_desireerr(mode, checkout=None, arr_dir=ARR_DIR, run=subprocess.run, out=
     if "\n  desireerr:" not in compose_text:
         out(f"Desireerr isn't in {compose_file}: setup.sh puts it there with [setup] whisparr = yes")
         return 1
-    current, what = desireerr_build(read_env(env_file))
+    env = read_env(env_file)
+    current, what = desireerr_build(env)
     if mode == "status":
-        out({"github": "the build of its GitHub repo (updated weekly)",
+        out({"release": "its newest release (updated weekly)",
+             "edge": "its dev branch, experimental (updated weekly)",
              "local": f"a build of your checkout at {what} (weekly updates skip it)",
              "dev": f"your checkout's code as it is, from {what}"}[current])
         return 0
@@ -1462,27 +1463,35 @@ def cmd_desireerr(mode, checkout=None, arr_dir=ARR_DIR, run=subprocess.run, out=
         if missing := [n for n in needed if not (checkout / n).is_file()]:
             out(f"{checkout} isn't a Desireerr checkout (no {', '.join(missing)})")
             return 1
+    pull = False
     if mode == "local":
         version = checkout_version(checkout, run)
         run(desireerr_build_command(docker, checkout, run), check=True)
-        write_env(env_file, DESIREERR_BUILD=f"local:{version}", DESIREERR_CODE=None)
-    elif mode == "dev":
-        write_env(env_file, DESIREERR_CODE=str(checkout), DESIREERR_BUILD=None)
+        write_env(env_file, DESIREERR_IMAGE=DESIREERR_IMAGE, DESIREERR_BUILD=f"local:{version}",
+                  DESIREERR_CODE=None)
+    elif mode == "dev":  # the code of a checkout in whichever image runs (a local build's goes)
+        if current == "local":
+            write_env(env_file, DESIREERR_IMAGE=None, DESIREERR_BUILD=None)
+        write_env(env_file, DESIREERR_CODE=str(checkout))
     else:
-        write_env(env_file, DESIREERR_BUILD=None, DESIREERR_CODE=None)
-        if not (source := compose_context(compose_text)):
-            out(f"no build context for Desireerr in {compose_file}; run setup.sh")
-            return 1
-        run(desireerr_build_command(docker, source, run), check=True)
+        pull = True
+        edge = mode == "edge"
+        write_env(env_file, DESIREERR_IMAGE=DESIREERR_EDGE_IMAGE if edge else None,
+                  DESIREERR_BUILD=None, DESIREERR_CODE=None)
+    if pull:
+        run(compose + ["pull", "desireerr"], check=True)
     run(compose + ["up", "-d", "desireerr"], check=True)
     if mode == "local":
         out(f"Desireerr: your checkout at {version}; weekly updates skip it until "
-            f"`./setup_helper.py desireerr github`")
+            f"`./setup_helper.py desireerr release`")
     elif mode == "dev":
         out(f"Desireerr: the code in {checkout}; after a change: docker restart desireerr "
-            f"(`./setup_helper.py desireerr github`: back)")
+            f"(`./setup_helper.py desireerr release`: back)")
+    elif mode == "edge":
+        out("Desireerr: its dev branch's image, experimental, updated weekly "
+            "(this command again for it right away; `./setup_helper.py desireerr release`: back)")
     else:
-        out("Desireerr: the build of its GitHub repo, updated weekly again")
+        out("Desireerr: its newest release, updated weekly")
     return 0
 
 
@@ -1563,8 +1572,8 @@ def main(argv=None):
     sub.add_parser("serve-services")
     sub.add_parser("service-host")
     sub.add_parser("storage-candidates", help="lsblk -J on stdin -> tab-separated candidates")
-    p = sub.add_parser("desireerr", help="which Desireerr runs: the build of its GitHub repo, "
-                       "a build of your checkout (local), or your checkout's code (dev)")
+    p = sub.add_parser("desireerr", help="which Desireerr runs: its newest release, its dev branch "
+                       "(edge), a build of your checkout (local), or your checkout's code (dev)")
     p.add_argument("mode", nargs="?", default="status", choices=DESIREERR_MODES)
     p.add_argument("checkout", nargs="?", help="local, dev: the checkout (default: beside "
                    "torrent-box's, else ~/desireerr)")

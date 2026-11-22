@@ -1,15 +1,14 @@
 
 # Desireerr, Whisparr's request app (with [setup] whisparr = yes, appended after Whisparr).
-# No registry: its image is built from its repo, here and again every week by arr-update, so a
-# push to its main branch is all a new version needs. `./setup_helper.py desireerr local|dev`
-# runs a build of your checkout, or your checkout's code as it is, instead (`github`: back);
-# .env beside this file says which (DESIREERR_BUILD, DESIREERR_CODE). It writes the scenes'
+# Its image comes from GitHub Actions on its repo: `latest` is the newest release (a merge to
+# main), updated every week by arr-update. `./setup_helper.py desireerr edge` follows its dev
+# branch instead (experimental), `local|dev` runs a build of your checkout, or your checkout's
+# code as it is (`release`: back); .env beside this file says which (DESIREERR_IMAGE,
+# DESIREERR_BUILD, DESIREERR_CODE). It writes the scenes'
 # .nfo files beside them, so it sees the storage disk at Whisparr's path, and reads Whisparr's
 # API key from its config folder.
   desireerr:
-    build:  # built by setup.sh and arr-update with docker build, the same way each time
-      context: @DESIREERR_SOURCE@
-    image: torrent-box/desireerr
+    image: ${DESIREERR_IMAGE:-ghcr.io/vibesclauder/desireerr:latest}
     container_name: desireerr
     network_mode: host
     restart: unless-stopped

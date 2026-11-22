@@ -1322,9 +1322,11 @@ class PageTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as arr, \
                 mock.patch.object(db, "http_get", lambda url: b'{"setup_needed": false, "version": "1.3"}'):
             env = Path(arr, ".env")
-            self.assertEqual(db.check_desireerr({}, arr)["build"], "")  # no .env: GitHub's
+            self.assertEqual(db.check_desireerr({}, arr)["build"], "")  # no .env: the release
             for text, build in (("DESIREERR_BUILD=local:26c5293+\n", "local 26c5293+"),
-                                ("DESIREERR_CODE=/home/me/desireerr\n", "dev"), ("OTHER=1\n", "")):
+                                ("DESIREERR_CODE=/home/me/desireerr\n", "dev"),
+                                ("DESIREERR_IMAGE=ghcr.io/vibesclauder/desireerr:dev\n", "edge"),
+                                ("OTHER=1\n", "")):
                 with self.subTest(env=text):
                     env.write_text(text)
                     c = db.check_desireerr({}, arr)

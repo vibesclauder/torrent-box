@@ -42,9 +42,7 @@ DASHBOARD_UNIT=/etc/systemd/system/torrent-box-dashboard.service
 DASHBOARD_PORT=80  # the box's name alone opens the start page
 DASHBOARD_ICONS=/usr/local/share/torrent-box/icons  # dashboard.WEBAPP_ICON_DIRS
 INSTALLED=/usr/local/share/torrent-box/installed.json  # dashboard.INSTALLED_FILE
-DESIREERR_REPO=https://github.com/vibesclauder/desireerr.git  # requests for StashDB scenes (public)
-DESIREERR_SOURCE=$DESIREERR_REPO#main  # its image is built from there (arr-compose-desireerr.yml)
-DESIREERR_IMAGE=torrent-box/desireerr  # setup_helper.DESIREERR_IMAGE
+DESIREERR_RELEASE_IMAGE=ghcr.io/vibesclauder/desireerr:latest  # GitHub Actions publishes it (arr-compose-desireerr.yml)
 DESIREERR_UP=0  # its container is in compose.yml this run (setup_arr)
 DESIREERR_PORT=5056
 DESIREERR_DATA=$ARR_DIR/desireerr/data  # its settings, users and requests (its container's /data)
@@ -1844,8 +1842,7 @@ setup_arr() {
       (( ! DESIREERR_UP )) || cat "$REPO/templates/arr-compose-desireerr.yml"
     } >"$TMP/compose.template"
     helper render "$TMP/compose.template" "PUID=$(id -u)" "PGID=${pgid:-107}" \
-        "TZ=${tz:-Etc/UTC}" "ARR_DIR=$ARR_DIR" "STORAGE_ROOT=$storage_root" \
-        "DESIREERR_SOURCE=$DESIREERR_SOURCE" >"$TMP/compose.yml"
+        "TZ=${tz:-Etc/UTC}" "ARR_DIR=$ARR_DIR" "STORAGE_ROOT=$storage_root" >"$TMP/compose.yml"
     update_file "$TMP/compose.yml" "$ARR_DIR/compose.yml" 644 || true
     (( ! DESIREERR_UP )) || desireerr_move_over
     # Pulls missing images and (re)creates only the containers whose definition changed.
@@ -2022,38 +2019,36 @@ desireerr_unit_gone() {
     run systemctl --user daemon-reload
 }
 
-# Desireerr's image, built from $DESIREERR_SOURCE (cached: only a new commit makes a new one,
-# and the "up" after it recreates the container), unless a build of your checkout runs. Fails
-# when it has none at all, so nothing is taken down for a container that can't start.
+# Desireerr's image: pulled, the one the .env says (its newest release without a word there, see
+# setup_helper.py desireerr), unless a build of your checkout runs. Fails when it has none at
+# all, so nothing is taken down for a container that can't start.
 desireerr_image() {
-    local before after
+    local image before after
+    image=$(sed -n 's/^DESIREERR_IMAGE=//p' "$ARR_DIR/.env" 2>/dev/null | tail -1)
+    : "${image:=$DESIREERR_RELEASE_IMAGE}"
     if grep -q '^DESIREERR_BUILD=local:' "$ARR_DIR/.env" 2>/dev/null &&  # (no password asked here)
-            { docker image inspect "$DESIREERR_IMAGE" || sudo -n docker image inspect "$DESIREERR_IMAGE"; } >/dev/null 2>&1; then
-        info "Desireerr: a build of your checkout runs, not rebuilt (./setup_helper.py desireerr github: back)"
+            { docker image inspect "$image" || sudo -n docker image inspect "$image"; } >/dev/null 2>&1; then
+        info "Desireerr: a build of your checkout runs, not pulled (./setup_helper.py desireerr release: back)"
         return 0
     fi
-    # The same build as arr-update's and setup_helper.py's: buildx's provenance (on by default)
-    # is new on every build, and the image with it, so every build would be a "new" image.
-    DESIREERR_BUILD_FLAGS=(-q -t "$DESIREERR_IMAGE")
-    if docker buildx version >/dev/null 2>&1; then DESIREERR_BUILD_FLAGS+=(--provenance=false); fi
     if (( DRY_RUN )); then
-        info "would run: sudo docker build ${DESIREERR_BUILD_FLAGS[*]} $DESIREERR_SOURCE"
+        info "would run: sudo docker pull -q $image"
         return 0
     fi
-    before=$(sudo docker image inspect -f '{{.Id}}' "$DESIREERR_IMAGE" 2>/dev/null || true)
-    if sudo docker build "${DESIREERR_BUILD_FLAGS[@]}" "$DESIREERR_SOURCE" >/dev/null; then
-        after=$(sudo docker image inspect -f '{{.Id}}' "$DESIREERR_IMAGE" 2>/dev/null || true)
+    before=$(sudo docker image inspect -f '{{.Id}}' "$image" 2>/dev/null || true)
+    if sudo docker pull -q "$image" >/dev/null; then
+        after=$(sudo docker image inspect -f '{{.Id}}' "$image" 2>/dev/null || true)
         if [[ $after != "$before" ]]; then
-            info "Desireerr: image built from $DESIREERR_SOURCE"
-            changed "Desireerr: a new image built from $DESIREERR_SOURCE"
+            info "Desireerr: image pulled, $image"
+            changed "Desireerr: a new image pulled, $image"
         fi
         return 0
     fi
     if [[ -n $before ]]; then
-        warn "couldn't build Desireerr's image from $DESIREERR_SOURCE; it keeps the one it has"
+        warn "couldn't pull Desireerr's image, $image; it keeps the one it has"
         return 0
     fi
-    warn "couldn't build Desireerr's image from $DESIREERR_SOURCE; it stays as it is until a setup run can"
+    warn "couldn't pull Desireerr's image, $image; it stays as it is until a setup run can"
     return 1
 }
 
