@@ -1740,7 +1740,7 @@ ntfy_repo() {
 # The root jobs' way to push to your ntfy topic (it holds the topic: root-only).
 install_push() {
     [[ -n ${ntfy_topic:-} ]] || return 0
-    helper render "$REPO/templates/push" "NTFY_URL=$ntfy_server/$ntfy_topic" >"$TMP/push"
+    helper render "$REPO/templates/push" "NTFY_URL=$ntfy_server/$ntfy_topic" "DASHBOARD_URL=http://127.0.0.1:$DASHBOARD_PORT" >"$TMP/push"
     update_file "$TMP/push" "$LIB/push" 700 root || true
 }
 
@@ -2157,6 +2157,7 @@ setup_xxx_library() {
 setup_dashboard() {
     step "Start page (http://$(hostname)/)"
     local changed=0
+    apt_install python3-cryptography  # pushes to the browsers it's installed in (Web Push)
     if update_file "$(stamped "$REPO/dashboard.py")" "$DASHBOARD_BIN" 755 root; then changed=1; fi
     # The commit, its date and the checkout, for the update check: read when needed, so a new
     # commit alone needs no restart, and isn't listed as a change.

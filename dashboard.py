@@ -22,12 +22,14 @@ import configparser
 import errno
 import functools
 import hashlib
+import hmac
 import html
 import http.client
 import ipaddress
 import json
 import os
 import re
+import secrets
 import socket
 import subprocess
 import sys
@@ -1369,7 +1371,10 @@ def push_event(s, kind, cid, c):
 
 
 def send_push(s, title, message, priority, tags, click=None):
-    """False if it couldn't be sent; True also when pushes are off (no topic)."""
+    """False if it couldn't be sent to ntfy; True also when it's off (no topic). Browsers
+    with the page installed get it too, whatever ntfy did."""
+    if WEBPUSH:
+        WEBPUSH.send(title, message)
     if not s["ntfy_topic"]:
         return True
     body = {"topic": s["ntfy_topic"], "title": title, "message": message, "priority": priority,
@@ -1384,6 +1389,243 @@ def send_push(s, title, message, priority, tags, click=None):
         return False
     print(f"pushed: {title}", file=sys.stderr, flush=True)
     return True
+
+
+### Web Push
+
+# Where a browser's push service lives; the box only ever posts to these, never to an
+# address typed into a form.
+PUSH_HOSTS = (".googleapis.com", ".push.services.mozilla.com", ".push.apple.com",
+              ".notify.windows.com")
+PUSH_DEVICES = 20          # subscribed browsers at most
+PUSH_TEST_EVERY = 10       # seconds between two test pushes
+PUSH_HEADER = "X-Requested-With"  # a form on another site can't send it without our say-so
+
+
+def b64url(raw):
+    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
+
+
+def unb64url(text):
+    return base64.urlsafe_b64decode(text + "=" * (-len(text) % 4))
+
+
+def push_crypto():
+    """The `cryptography` package (apt: python3-cryptography), which Web Push's encryption
+    needs; None without it, and the page then offers no push to devices."""
+    try:
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives.asymmetric import ec
+        from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+        from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+    except ImportError:
+        return None
+    return {"hashes": hashes, "serialization": serialization, "ec": ec, "AESGCM": AESGCM,
+            "HKDF": HKDF, "decode_dss_signature": decode_dss_signature}
+
+
+class WebPush:
+    """Push notifications to the browsers where the start page is installed (RFC 8030 push,
+    RFC 8291 encryption, RFC 8292 VAPID), next to the ntfy ones. The VAPID key, the
+    subscriptions and a token for the root jobs live in state_dir (none: kept until restart)."""
+
+    def __init__(self, state_dir=None):
+        self.c = push_crypto()
+        self.dir = Path(state_dir) if state_dir else None
+        self.lock = threading.Lock()
+        self.subs = []          # {"endpoint", "p256dh", "auth", "label"}
+        self.key = None
+        self.token = secrets.token_urlsafe(24)
+        self.tested = 0.0
+        if self.dir:
+            try:
+                self.subs = json.loads((self.dir / "push.json").read_text())
+            except (OSError, ValueError):
+                pass
+            try:
+                self.token = (self.dir / "push-token").read_text().strip() or self.token
+            except OSError:
+                self.write("push-token", self.token)
+
+    @property
+    def supported(self):
+        return self.c is not None
+
+    def write(self, name, text):
+        if not self.dir:
+            return
+        try:
+            path = self.dir / name
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w") as f:
+                f.write(text)
+        except OSError as e:
+            print(f"can't keep {name}: {e}", file=sys.stderr, flush=True)
+
+    def private_key(self):
+        if self.key is None:
+            ec = self.c["ec"]
+            try:
+                saved = (self.dir / "vapid.key").read_text().strip() if self.dir else ""
+            except OSError:
+                saved = ""
+            if saved:
+                self.key = ec.derive_private_key(int.from_bytes(unb64url(saved), "big"), ec.SECP256R1())
+            else:
+                self.key = ec.generate_private_key(ec.SECP256R1())
+                self.write("vapid.key", b64url(self.key.private_numbers().private_value.to_bytes(32, "big")))
+        return self.key
+
+    def public_key(self):
+        sr = self.c["serialization"]
+        return b64url(self.private_key().public_key().public_bytes(
+            sr.Encoding.X962, sr.PublicFormat.UncompressedPoint))
+
+    @staticmethod
+    def endpoint_ok(url):
+        try:
+            parts = urllib.parse.urlsplit(url)
+            host = (parts.hostname or "").lower()
+            return (parts.scheme == "https" and not parts.username and not parts.port
+                    and any(host.endswith(h) for h in PUSH_HOSTS))
+        except ValueError:
+            return False
+
+    def save(self):
+        self.write("push.json", json.dumps(self.subs))
+
+    def subscribe(self, body):
+        """Remember a browser's subscription (again, if it's known); ValueError if it's not one."""
+        endpoint = str(body.get("endpoint") or "")
+        keys = body.get("keys") or {}
+        p256dh, auth = str(keys.get("p256dh") or ""), str(keys.get("auth") or "")
+        if not self.endpoint_ok(endpoint):
+            raise ValueError("not a push service address")
+        try:
+            if len(unb64url(p256dh)) != 65 or len(unb64url(auth)) != 16:
+                raise ValueError
+        except ValueError:
+            raise ValueError("invalid keys") from None
+        label = re.sub(r"\s+", " ", str(body.get("label") or "")).strip()[:60]
+        with self.lock:
+            self.subs = [x for x in self.subs if x["endpoint"] != endpoint]
+            if len(self.subs) >= PUSH_DEVICES:
+                raise ValueError(f"{PUSH_DEVICES} devices is the most")
+            self.subs.append({"endpoint": endpoint, "p256dh": p256dh, "auth": auth, "label": label})
+            self.save()
+
+    def unsubscribe(self, endpoint):
+        with self.lock:
+            self.subs = [x for x in self.subs if x["endpoint"] != endpoint]
+            self.save()
+
+    def encrypt(self, sub, data):
+        """The body of a push, aes128gcm (RFC 8291) for a subscription's keys."""
+        c = self.c
+        ec, hashes, sr = c["ec"], c["hashes"], c["serialization"]
+        ua_public = unb64url(sub["p256dh"])
+        ephemeral = ec.generate_private_key(ec.SECP256R1())
+        as_public = ephemeral.public_key().public_bytes(sr.Encoding.X962, sr.PublicFormat.UncompressedPoint)
+        shared = ephemeral.exchange(ec.ECDH(), ec.EllipticCurvePublicKey.from_encoded_point(
+            ec.SECP256R1(), ua_public))
+        ikm = c["HKDF"](hashes.SHA256(), 32, unb64url(sub["auth"]),
+                        b"WebPush: info\0" + ua_public + as_public).derive(shared)
+        salt = os.urandom(16)
+        key = c["HKDF"](hashes.SHA256(), 16, salt, b"Content-Encoding: aes128gcm\0").derive(ikm)
+        nonce = c["HKDF"](hashes.SHA256(), 12, salt, b"Content-Encoding: nonce\0").derive(ikm)
+        sealed = c["AESGCM"](key).encrypt(nonce, data + b"\x02", None)
+        return salt + (4096).to_bytes(4, "big") + bytes([len(as_public)]) + as_public + sealed
+
+    def vapid(self, endpoint):
+        """The Authorization header that tells the push service who is pushing (RFC 8292)."""
+        c = self.c
+        parts = urllib.parse.urlsplit(endpoint)
+        claims = {"aud": f"{parts.scheme}://{parts.netloc}", "exp": int(time.time()) + 12 * 3600,
+                  "sub": f"https://github.com/{GITHUB_REPO}"}
+        head = b64url(json.dumps({"typ": "JWT", "alg": "ES256"}).encode())
+        text = f"{head}.{b64url(json.dumps(claims).encode())}"
+        r, sg = c["decode_dss_signature"](self.private_key().sign(
+            text.encode(), c["ec"].ECDSA(c["hashes"].SHA256())))
+        return f"vapid t={text}.{b64url(r.to_bytes(32, 'big') + sg.to_bytes(32, 'big'))}, k={self.public_key()}"
+
+    def deliver(self, sub, data):
+        """One push; a browser that has forgotten the subscription (404, 410) is dropped.
+        The reason for a failure, "" when it went through."""
+        try:
+            req = urllib.request.Request(
+                sub["endpoint"], data=self.encrypt(sub, data), method="POST",
+                headers={"Content-Encoding": "aes128gcm", "Content-Type": "application/octet-stream",
+                         "TTL": str(24 * 3600), "Urgency": "high", "User-Agent": "torrent-box-dashboard",
+                         "Authorization": self.vapid(sub["endpoint"])})
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                resp.read()
+            return ""
+        except urllib.error.HTTPError as e:
+            if e.code in (404, 410):
+                self.unsubscribe(sub["endpoint"])
+                return "the device has unsubscribed"
+            reason = f"the push service answered {e.code}"
+        except OSError as e:
+            reason = f"can't reach the push service: {problem(e)}"
+        print(f"web push failed: {reason}", file=sys.stderr, flush=True)
+        return reason
+
+    def send(self, title, message, tag="", wait=False):
+        """Push to every subscribed browser; in the background unless wait. How many were
+        reached (with wait)."""
+        if not self.supported or not self.subs:
+            return 0
+        data = json.dumps({"title": title[:120], "body": message[:600], "tag": tag or None,
+                           "url": "/"}).encode()
+        subs = list(self.subs)
+        if not wait:
+            for sub in subs:
+                threading.Thread(target=self.deliver, args=(sub, data), daemon=True).start()
+            return len(subs)
+        return sum(1 for sub in subs if not self.deliver(sub, data))
+
+    def test(self, now=None):
+        """A test push now; ValueError when there's no one to send to or it was too soon."""
+        now = time.monotonic() if now is None else now
+        if not self.subs:
+            raise ValueError("no device has subscribed")
+        if now - self.tested < PUSH_TEST_EVERY:
+            raise ValueError("wait a few seconds")
+        self.tested = now
+        if not self.send("torrent-box", "This is a test.", "test", wait=True):
+            raise ValueError("it didn't reach any device")
+
+
+# Set in main(): the start page's own pushes go to subscribed browsers as well as to ntfy.
+WEBPUSH = None
+
+SERVICE_WORKER = """// torrent-box's service worker: it only shows pushes, and brings the page forward on a tap.
+self.addEventListener("install", () => self.skipWaiting());
+self.addEventListener("activate", (e) => e.waitUntil(self.clients.claim()));
+self.addEventListener("push", (e) => {
+  let d = {};
+  try { d = e.data.json(); } catch (err) { /* shown plain */ }
+  e.waitUntil(self.registration.showNotification(d.title || "torrent-box", {
+    body: d.body || "", tag: d.tag || undefined, icon: "/app/icon-192.png",
+    badge: "/app/badge-96.png", data: { url: d.url || "/" },
+  }));
+});
+self.addEventListener("notificationclick", (e) => {
+  e.notification.close();
+  const url = new URL(e.notification.data.url || "/", self.location.origin).href;
+  e.waitUntil((async () => {
+    for (const c of await self.clients.matchAll({ type: "window", includeUncontrolled: true })) {
+      if (c.url.startsWith(self.location.origin) && "focus" in c) {
+        await c.focus();
+        if ("navigate" in c) await c.navigate(url).catch(() => {});
+        return;
+      }
+    }
+    await self.clients.openWindow(url);
+  })());
+});
+""".encode()
 
 
 ### Updates
@@ -1593,7 +1835,8 @@ BRAND = ("#4f5bd5", "#a14fd6")
 # To install the page as an app on a phone (over HTTPS): its manifest and icons, drawn by
 # tools/make_icons.py and installed by setup.sh (from a checkout: the repo's own).
 WEBAPP_ICON_DIRS = [Path("/usr/local/share/torrent-box/icons"), Path(__file__).resolve().parent / "icons"]
-WEBAPP_ICONS = ("icon-192.png", "icon-512.png", "icon-maskable-512.png", "icon-180.png")
+WEBAPP_ICONS = ("icon-192.png", "icon-512.png", "icon-maskable-512.png", "icon-180.png",
+                "badge-96.png")
 MANIFEST = json.dumps({
     "id": "/", "name": "torrent-box", "short_name": "torrent-box", "start_url": "/", "scope": "/",
     "display": "standalone", "background_color": "#0e1017", "theme_color": BRAND[0],
@@ -1843,6 +2086,48 @@ function useReachable(){
   }
 }
 """
+
+# The footer's "Notify this device": subscribes this browser to the box's pushes (it shows
+# only where that can work: HTTPS, the browser supports it, python3-cryptography is there).
+PUSH_SCRIPT = """
+(async()=>{
+  const link=document.getElementById("push-link");
+  if(!link||!("serviceWorker" in navigator)||!("PushManager" in window)||!isSecureContext)return;
+  const call=(path,body)=>fetch(path,{method:"POST",headers:{"X-Requested-With":"torrent-box","Content-Type":"application/json"},body:JSON.stringify(body||{})}).then(async r=>{
+    const d=await r.json().catch(()=>({}));if(!r.ok)throw new Error(d.error||("the box answered "+r.status));return d;});
+  const bytes=t=>Uint8Array.from(atob(t.replace(/-/g,"+").replace(/_/g,"/").padEnd(Math.ceil(t.length/4)*4,"=")),c=>c.charCodeAt(0));
+  const name=()=>{const u=navigator.userAgent;
+    return (/iPhone/.test(u)?"iPhone":/iPad/.test(u)?"iPad":/Android/.test(u)?"Android":/Windows/.test(u)?"Windows":/Mac/.test(u)?"Mac":/Linux/.test(u)?"Linux":"Device")+" "+
+      (/Edg\\//.test(u)?"Edge":/Firefox\\//.test(u)?"Firefox":/Chrome\\//.test(u)?"Chrome":/Safari\\//.test(u)?"Safari":"browser");};
+  let info;
+  try{info=await (await fetch("/push.json",{cache:"no-store"})).json();}catch(e){return;}
+  if(!info.supported)return;
+  const reg=await navigator.serviceWorker.register("/sw.js");
+  let sub=await reg.pushManager.getSubscription();
+  if(sub)call("/push/subscribe",{...sub.toJSON(),label:name()}).catch(()=>{});  // the box may have lost it
+  const draw=()=>{
+    link.hidden=false;
+    link.textContent=Notification.permission==="denied"?"Notifications are blocked":sub?"Stop notifying this device":"Notify this device";
+    link.title=sub?"Pushes to this device: click to stop":"";
+  };
+  link.onclick=async ev=>{
+    ev.preventDefault();
+    try{
+      if(Notification.permission==="denied")throw new Error("Notifications are blocked for this site in the browser's settings.");
+      if(sub){await call("/push/unsubscribe",{endpoint:sub.endpoint});await sub.unsubscribe();sub=null;}
+      else{
+        if(await Notification.requestPermission()!=="granted")throw new Error("Notifications weren't allowed.");
+        sub=await reg.pushManager.subscribe({userVisibleOnly:true,applicationServerKey:bytes(info.key)});
+        await call("/push/subscribe",{...sub.toJSON(),label:name()});
+        await call("/push/test").catch(()=>{});
+      }
+    }catch(e){alert(e.message);}
+    draw();
+  };
+  draw();
+})();
+"""
+
 
 SCRIPT = PROBE_SCRIPT + """
 useReachable();
@@ -2447,10 +2732,10 @@ def render(status, host, https=False):
 {others_html(status, host, https)}
 <h2>Health</h2>
 <div class="rows">{"".join(rows)}</div>
-<footer><span id="updated">Updated {updated}, refreshes every {REFRESH_SECONDS} s.</span>
+<footer><span><span id="updated">Updated {updated}, refreshes every {REFRESH_SECONDS} s.</span> <a href="#" id="push-link" hidden></a></span>
 <span>torrent-box{" " + e(version_text()) if VERSION else ""}{tailnet_link} · <a href="https://github.com/{GITHUB_REPO}">GitHub</a></span></footer>
 </main>
-</div><script>{SCRIPT}</script></body></html>
+</div><script>{SCRIPT}{PUSH_SCRIPT}</script></body></html>
 """
 
 
@@ -2642,6 +2927,7 @@ class Status:
 class Handler(BaseHTTPRequestHandler):
     server_version = "torrent-box-dashboard"
     status = None  # set in main()
+    webpush = None  # set in main()
 
     def do_GET(self):
         path = self.path.split("?", 1)[0]
@@ -2670,6 +2956,13 @@ class Handler(BaseHTTPRequestHandler):
             return
         elif path == "/manifest.webmanifest":
             body, kind = MANIFEST, "application/manifest+json"
+        elif path == "/sw.js":
+            body, kind = SERVICE_WORKER, "text/javascript"
+        elif path == "/push.json":
+            push = self.webpush
+            body = json.dumps({"supported": push.supported, "devices": len(push.subs),
+                               "key": push.public_key() if push.supported else ""}).encode()
+            kind = "application/json"
         elif path.startswith("/app/") and (icon := webapp_icon(path[5:])):
             body, kind = icon, "image/png"
         else:
@@ -2719,6 +3012,9 @@ class Handler(BaseHTTPRequestHandler):
                 return
             self.proxy_transmission(self.rfile.read(length))
             return
+        if self.path in ("/push/subscribe", "/push/unsubscribe", "/push/test", "/push/notify"):
+            self.push_post(self.path)
+            return
         if self.path != "/ncore-code" or not load_settings(self.status.config)["arr"]:
             self.send_error(404)
             return
@@ -2742,6 +3038,51 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Location", "/#ncore")
         self.send_header("Content-Length", "0")
         self.end_headers()
+
+    def push_post(self, path):
+        """The page's calls about push (subscribe, unsubscribe, test), and /push/notify for
+        the root jobs, which prove themselves with the token in state_dir."""
+        push = self.webpush
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            length = -1
+        if not 0 <= length <= 4096:
+            self.send_error(400)
+            return
+        raw = self.rfile.read(length)
+        if path == "/push/notify":
+            given = (self.headers.get("Authorization") or "").removeprefix("Bearer ")
+            if not push.token or not hmac.compare_digest(given.encode(), push.token.encode()):
+                self.send_error(403)
+                return
+        elif self.headers.get(PUSH_HEADER) != "torrent-box":
+            self.send_error(403, "Cross-site request")
+            return
+        try:
+            body = json.loads(raw or b"{}")
+            if not isinstance(body, dict):
+                raise ValueError("not an object")
+            if not push.supported:
+                raise ValueError("the box needs python3-cryptography for push to devices")
+            if path == "/push/subscribe":
+                push.subscribe(body)
+            elif path == "/push/unsubscribe":
+                push.unsubscribe(str(body.get("endpoint") or ""))
+            elif path == "/push/test":
+                push.test()
+            else:
+                push.send(str(body.get("title") or "torrent-box"), str(body.get("message") or ""),
+                          str(body.get("tag") or ""))
+            status, out = 200, {"devices": len(push.subs)}
+        except ValueError as e:
+            status, out = 400, {"error": str(e)}
+        data = json.dumps(out).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
 
     def log_message(self, fmt, *args):  # no access log in the journal
         pass
@@ -2769,7 +3110,9 @@ def main(argv=None):
     args = parser.parse_args(argv)
 
     # StateDirectory= in the unit (what was pushed about updates); run by hand: none
+    global WEBPUSH
     Handler.status = Status(args.config, args.arr_dir, os.environ.get("STATE_DIRECTORY"))
+    WEBPUSH = Handler.webpush = WebPush(os.environ.get("STATE_DIRECTORY"))
     if args.once:
         print(json.dumps(Handler.status.get(), indent=1))
         return 0

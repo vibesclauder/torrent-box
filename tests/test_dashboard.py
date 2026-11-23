@@ -494,6 +494,133 @@ class NtfyCheckTest(unittest.TestCase):
                           db.render(status, "box"))
 
 
+class WebPushTest(unittest.TestCase):
+    ENDPOINT = "https://fcm.googleapis.com/fcm/send/abc"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.push = db.WebPush(self.tmp.name)
+
+    def browser(self, endpoint=None):
+        """A browser's side of a subscription: its keys, as the page posts them."""
+        c = db.push_crypto()
+        ec, sr = c["ec"], c["serialization"]
+        key = ec.generate_private_key(ec.SECP256R1())
+        auth = bytes(range(16))
+        pub = key.public_key().public_bytes(sr.Encoding.X962, sr.PublicFormat.UncompressedPoint)
+        return key, auth, {"endpoint": endpoint or self.ENDPOINT,
+                           "keys": {"p256dh": db.b64url(pub), "auth": db.b64url(auth)}}
+
+    def test_only_known_push_services(self):
+        _, _, sub = self.browser()
+        self.push.subscribe(dict(sub, label="  My   phone "))
+        self.assertEqual([x["label"] for x in self.push.subs], ["My phone"])
+        for bad in ("http://fcm.googleapis.com/x", "https://localhost/x", "https://192.168.1.2/x",
+                    "https://fcm.googleapis.com.evil.example/x", "https://u@fcm.googleapis.com/x",
+                    "https://fcm.googleapis.com:8443/x", "https://[::1/x"):
+            with self.assertRaises(ValueError, msg=bad):
+                self.push.subscribe(dict(sub, endpoint=bad))
+        with self.assertRaises(ValueError):
+            self.push.subscribe({"endpoint": self.ENDPOINT, "keys": {"p256dh": "x", "auth": "y"}})
+
+    def test_subscriptions_survive_a_restart_and_the_limit_holds(self):
+        _, _, sub = self.browser()
+        self.push.subscribe(sub)
+        self.push.subscribe(sub)  # again: still one
+        self.assertEqual(len(db.WebPush(self.tmp.name).subs), 1)
+        self.assertEqual(db.WebPush(self.tmp.name).token, self.push.token)
+        self.assertEqual(db.WebPush(self.tmp.name).public_key(), self.push.public_key())
+        for i in range(db.PUSH_DEVICES - 1):
+            self.push.subscribe(self.browser(f"https://fcm.googleapis.com/{i}")[2])
+        with self.assertRaises(ValueError):
+            self.push.subscribe(self.browser("https://fcm.googleapis.com/more")[2])
+        self.push.unsubscribe(self.ENDPOINT)
+        self.assertEqual(len(self.push.subs), db.PUSH_DEVICES - 1)
+
+    def test_encrypted_the_way_a_browser_decrypts(self):
+        key, auth, sub = self.browser()
+        body = self.push.encrypt({"p256dh": sub["keys"]["p256dh"], "auth": sub["keys"]["auth"]}, b"hi")
+        c = db.push_crypto()
+        ec, hashes, sr = c["ec"], c["hashes"], c["serialization"]
+        salt, idlen = body[:16], body[20]
+        as_public, sealed = body[21:21 + idlen], body[21 + idlen:]
+        ua = key.public_key().public_bytes(sr.Encoding.X962, sr.PublicFormat.UncompressedPoint)
+        shared = key.exchange(ec.ECDH(), ec.EllipticCurvePublicKey.from_encoded_point(ec.SECP256R1(), as_public))
+        ikm = c["HKDF"](hashes.SHA256(), 32, auth, b"WebPush: info\0" + ua + as_public).derive(shared)
+        cek = c["HKDF"](hashes.SHA256(), 16, salt, b"Content-Encoding: aes128gcm\0").derive(ikm)
+        nonce = c["HKDF"](hashes.SHA256(), 12, salt, b"Content-Encoding: nonce\0").derive(ikm)
+        self.assertEqual(c["AESGCM"](cek).decrypt(nonce, sealed, None), b"hi\x02")
+
+    def test_a_push_goes_to_every_device_and_a_forgotten_one_is_dropped(self):
+        for i in range(2):
+            self.push.subscribe(self.browser(f"https://fcm.googleapis.com/{i}")[2])
+        gone = db.urllib.error.HTTPError(self.ENDPOINT, 410, "Gone", {}, None)
+        calls = []
+
+        def fake(req, timeout):
+            calls.append(req.full_url)
+            if req.full_url.endswith("/1"):
+                raise gone
+            return mock.MagicMock()
+        with mock.patch.object(db.urllib.request, "urlopen", fake):
+            self.assertEqual(self.push.send("Jellyfin is down", "not running", wait=True), 1)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual([x["endpoint"] for x in self.push.subs], ["https://fcm.googleapis.com/0"])
+
+    def test_send_push_reaches_browsers_with_or_without_ntfy(self):
+        sent = []
+        push = mock.MagicMock(send=lambda *a, **k: sent.append(a))
+        with mock.patch.object(db, "WEBPUSH", push):
+            s = {"ntfy_topic": "", "ntfy_server": "x"}
+            self.assertTrue(db.send_push(s, "T", "M", 3, []))
+        self.assertEqual(sent, [("T", "M")])
+
+    def test_test_push_is_rate_limited(self):
+        with self.assertRaises(ValueError):
+            self.push.test(now=100)  # no one subscribed
+        self.push.subscribe(self.browser()[2])
+        with mock.patch.object(self.push, "deliver", lambda sub, data: ""):
+            self.push.test(now=100)
+            with self.assertRaises(ValueError):
+                self.push.test(now=105)
+            self.push.test(now=111)
+
+    def test_the_calls(self):
+        config = write_config(Path(self.tmp.name), "http://127.0.0.1:9")
+        db.Handler.status = db.Status(config, Path(self.tmp.name) / "arr")
+        db.Handler.webpush = self.push
+        httpd = db.Server(("127.0.0.1", 0), db.Handler)
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        self.addCleanup(httpd.server_close)
+        self.addCleanup(httpd.shutdown)
+
+        def call(path, body=None, headers=None, method="POST"):
+            conn = http.client.HTTPConnection(*httpd.server_address)
+            conn.request(method, path, json.dumps(body or {}) if method == "POST" else None, headers or {})
+            r = conn.getresponse()
+            return r.status, r.read()
+        ours = {"X-Requested-With": "torrent-box"}
+        _, _, sub = self.browser()
+        self.assertEqual(call("/push/subscribe", sub)[0], 403)            # another site's form
+        self.assertEqual(call("/push/subscribe", dict(sub, endpoint="https://evil.example/"), ours)[0], 400)
+        self.assertEqual(call("/push/subscribe", sub, ours)[0], 200)
+        info = json.loads(call("/push.json", method="GET")[1])
+        self.assertEqual((info["supported"], info["devices"], info["key"]), (True, 1, self.push.public_key()))
+        self.assertIn(b"showNotification", call("/sw.js", method="GET")[1])
+        # the root jobs: only with the token
+        sent = []
+        with mock.patch.object(self.push, "send", lambda *a, **k: sent.append(a) or 1):
+            self.assertEqual(call("/push/notify", {"title": "Disk problem", "message": "m"})[0], 403)
+            self.assertEqual(call("/push/notify", {"title": "Disk problem", "message": "m"},
+                                  {"Authorization": "Bearer nope"})[0], 403)
+            self.assertEqual(call("/push/notify", {"title": "Disk problem", "message": "m"},
+                                  {"Authorization": f"Bearer {self.push.token}"})[0], 200)
+        self.assertEqual(sent, [("Disk problem", "m", "")])
+        self.assertEqual(call("/push/unsubscribe", {"endpoint": self.ENDPOINT}, ours)[0], 200)
+        self.assertEqual(self.push.subs, [])
+
+
 class WatcherTest(unittest.TestCase):
     def test_alerts_after_a_while_once_and_when_back(self):
         w = db.Watcher(delay=600)

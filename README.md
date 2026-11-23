@@ -419,6 +419,23 @@ relay on ntfy.sh, which torrent-box doesn't set up.
 The start page has a **Notifications** row for it (no push when it's down: it would have to
 go through it). `own_ntfy = no` stops and disables the server; the package stays.
 
+### Pushes to the phone it's installed on
+
+Next to ntfy, the start page pushes to the browsers it's installed in (Web Push), so an
+installed app gets what ntfy would: an app or the disk that stays wrong and is fine again, a
+new torrent-box version, and what the root jobs push (a disk's warning, the weekly update).
+Open the start page **over HTTPS** (the Tailscale name; an iPhone or iPad needs it added to the
+Home Screen first) and tap **Notify this device** in the footer; it sends a test. Needs
+`python3-cryptography` (setup installs it); without it the link doesn't show.
+
+- The subscriptions, the key and a token for the root jobs are in
+  `/var/lib/torrent-box-dashboard`. `push` hands the root jobs' pushes to the start page with
+  that token, and it's best effort: ntfy stays the one that must arrive.
+- Like the rest of the page, anyone on the LAN or tailnet can subscribe a device. The box only
+  ever pushes to Google's, Mozilla's, Apple's and Microsoft's push services.
+- Seerr and Desireerr push to devices themselves (Settings, Notifications in each); they don't
+  go through the start page.
+
 ## Search and requests (Prowlarr, Sonarr, Radarr, Seerr)
 
 With `[setup] arr = yes`, setup installs Docker (Ubuntu's `docker.io` + `docker-compose-v2`)

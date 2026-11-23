@@ -48,8 +48,22 @@ def png_rgba(canvas, alpha):
             chunk(b"IDAT", zlib.compress(bytes(raw), 9)) + chunk(b"IEND", b""))
 
 
+def badge(size):
+    """The tray and arrow alone, white on transparent: the small icon in Android's status bar
+    uses only the alpha, so the coloured tile would show as a white square."""
+    k = size / 30
+
+    def at(points):
+        return [((x - 9) * k, (y - 8.5) * k) for x, y in points]
+    tray = [(13, 24), (13, 33)] + ms.arc(16, 33, 3, 180, 90) + [(32, 36)] + ms.arc(32, 33, 3, 90, 0) + [(35, 24)]
+    strokes = [at(tray), at([(24, 11), (24, 27)]), at([(17.5, 20.5), (24, 27), (30.5, 20.5)])]
+    return [[[255, 255, 255] for _ in range(size)] for _ in range(size)], ms.stroke_coverage(strokes, 3.3 * k)
+
+
 def main():
     OUT.mkdir(exist_ok=True)
+    (OUT / "badge-96.png").write_bytes(png_rgba(*badge(96)))
+    print(f"wrote {OUT / 'badge-96.png'}")
     for name, (size, rounded) in ICONS.items():
         (OUT / name).write_bytes(png_rgba(*draw(size, rounded)))
         print(f"wrote {OUT / name}")

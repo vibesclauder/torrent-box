@@ -4,5 +4,13 @@
 # /usr/local/lib/torrent-box/push, readable by root only since it holds the topic.
 [ $# -ge 2 ] || { echo "usage: push TITLE MESSAGE [PRIORITY] [TAGS]" >&2; exit 2; }
 title=$(printf '%s' "$1" | tr -d '\r\n')
+# the start page pushes it to the browsers it's installed in too (best effort; the token is in
+# its state directory, which root can read)
+token=$(cat /var/lib/torrent-box-dashboard/push-token 2>/dev/null || true)
+if [ -n "$token" ]; then
+    python3 -c 'import json,sys; print(json.dumps({"title": sys.argv[1], "message": sys.argv[2]}))' \
+        "$title" "$2" | curl -fsS --max-time 10 -o /dev/null -H "Authorization: Bearer $token" \
+        -H "Content-Type: application/json" --data-binary @- "@DASHBOARD_URL@/push/notify" || true
+fi
 exec curl -fsS --max-time 30 -o /dev/null -H "Title: $title" -H "Priority: ${3:-high}" \
     -H "Tags: ${4:-warning}" --data-binary "$2" "@NTFY_URL@"
