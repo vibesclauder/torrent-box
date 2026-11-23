@@ -671,16 +671,23 @@ def arr_connect(apis, keys, rpc_user, rpc_password, downloads_dir, misc_dir, ser
     if push:
         # Prowlarr's webhooks to the start page, which pushes them to the browsers it's
         # installed in. Their own items, since a notification's events are one set.
-        hook = {"url": f"{push[0]}/push/prowlarr", "method": 1,
-                "headers": [{"key": "Authorization", "value": f"Bearer {push[1]}"}]}
+        # (a webhook has no headers field here: the token goes as the basic-auth password)
+        hook = {"url": f"{push[0]}/push/prowlarr", "method": 1, "username": "torrent-box",
+                "password": push[1]}
+        # the password comes back masked: a new token is seen by the last run's fingerprint
+        seen = hashlib.sha256(push[1].encode()).hexdigest()[:16]
+        force = state.get("push") != seen
         result = ensure_item(apis["prowlarr"], "notification", "start page health (torrent-box)",
-                             "Webhook", hook, extra={"onHealthIssue": True, "onHealthRestored": True,
-                                                     "includeHealthWarnings": False})
+                             "Webhook", hook, force=force,
+                             extra={"onHealthIssue": True, "onHealthRestored": True,
+                                    "includeHealthWarnings": False})
         yield f"prowlarr: health alerts to the start page: {result}"
         result = ensure_item(apis["prowlarr"], "notification", "start page grabs (torrent-box)",
-                             "Webhook", hook, extra={"onGrab": True, "includeManualGrabs": True,
-                                                     "onHealthIssue": False, "onHealthRestored": False})
+                             "Webhook", hook, force=force,
+                             extra={"onGrab": True, "includeManualGrabs": True,
+                                    "onHealthIssue": False, "onHealthRestored": False})
         yield f"prowlarr: grabs to the start page: {result}"
+        state["push"] = seen
     if ntfy:
         # e.g. the nCore login failing once its session expires (new 2FA code needed)
         result = ensure_item(apis["prowlarr"], "notification", "ntfy (torrent-box)", "Ntfy",

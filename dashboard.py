@@ -1597,6 +1597,19 @@ class WebPush:
             raise ValueError("it didn't reach any device")
 
 
+def bearer_token(header):
+    """The token in an Authorization header: "Bearer <token>", or the password of basic auth
+    (Prowlarr's webhooks can't send headers of their own)."""
+    if header.startswith("Bearer "):
+        return header[7:]
+    if header.startswith("Basic "):
+        try:
+            return base64.b64decode(header[6:]).decode().partition(":")[2]
+        except ValueError:
+            pass
+    return ""
+
+
 def prowlarr_push(event):
     """A push for what Prowlarr's webhook posts: (title, message, tag), or None for what isn't
     worth one (its other event types)."""
@@ -3073,7 +3086,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         raw = self.rfile.read(length)
         if path in ("/push/notify", "/push/prowlarr"):
-            given = (self.headers.get("Authorization") or "").removeprefix("Bearer ")
+            given = bearer_token(self.headers.get("Authorization") or "")
             if not push.token or not hmac.compare_digest(given.encode(), push.token.encode()):
                 self.send_error(403)
                 return

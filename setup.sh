@@ -2624,12 +2624,12 @@ main() {
     setup_tailscale
     setup_ntfy
     setup_disk_health
+    setup_dashboard  # before Prowlarr's webhooks to it: Prowlarr tests them when saving
     setup_arr
     setup_arr_updates
     setup_rss2transmission
     setup_desireerr
     setup_xxx_library
-    setup_dashboard
     setup_tailscale_https
     setup_tailscale_services
     setup_firewall

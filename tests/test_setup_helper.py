@@ -512,7 +512,7 @@ SCHEMAS = {  # field names as in the apps' TransmissionSettings.cs / SonarrSetti
             "serverUrl", "accessToken", "userName", "password", "priority", "topics", "tags",
             "clickUrl")},
             {"implementation": "Webhook", "onHealthIssue": False, "fields": _fields(
-                "url", "method", "username", "password", "headers")}],
+                "url", "method", "username", "password")}],
         # ncore.yml's settings plus Cardigann's own
         "indexer": [{"implementation": "Cardigann", "definitionName": "ncore", "name": "nCore",
                      "enable": False, "appProfileId": 0, "fields": _fields(
@@ -669,8 +669,8 @@ class ArrConnectTest(unittest.TestCase):
         self.assertEqual([n["implementation"] for n in p.items["notification"]], ["Webhook", "Webhook"])
         name = "start page health (torrent-box)"
         self.assertEqual(p.field("notification", name, "url"), "http://127.0.0.1/push/prowlarr")
-        self.assertEqual(p.field("notification", name, "headers"),
-                         [{"key": "Authorization", "value": "Bearer tok"}])
+        self.assertEqual((p.field("notification", name, "username"), p.field("notification", name, "password")),
+                         ("torrent-box", "tok"))
         health, grabs = p.items["notification"]
         self.assertEqual((health["onHealthIssue"], health["onGrab"] if "onGrab" in health else None), (True, None))
         self.assertEqual((grabs["onGrab"], grabs["onHealthIssue"]), (True, False))

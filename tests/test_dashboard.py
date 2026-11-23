@@ -619,7 +619,8 @@ class WebPushTest(unittest.TestCase):
         self.assertEqual(sent, [("Disk problem", "m", "")])
         # Prowlarr's webhook: the same token, and its events worded as pushes
         sent.clear()
-        auth = {"Authorization": f"Bearer {self.push.token}"}
+        basic = base64.b64encode(f"torrent-box:{self.push.token}".encode()).decode()
+        auth = {"Authorization": f"Basic {basic}"}  # what Prowlarr's webhook sends
         with mock.patch.object(self.push, "send", lambda *a, **k: sent.append(a) or 1):
             self.assertEqual(call("/push/prowlarr", {"eventType": "Health"})[0], 403)
             for event in ({"eventType": "Health", "level": "error", "message": "nCore is down"},
