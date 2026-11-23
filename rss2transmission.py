@@ -11,7 +11,8 @@ One run, normally started every few minutes by a systemd timer:
      or deleted there), with the files, once nCore's seeding rule is met; with minimal_seed,
      remove every download from Transmission as soon as that rule is met
   6. check free space on the storage disk
-  7. push a summary to ntfy (added / downloaded / removed / problems)
+  7. push a summary (added / downloaded / removed / problems) to the browsers the start page
+     is installed in, and to ntfy if there's a topic
 A torrent is only marked seen once Transmission accepted it, and a finished download only
 counts as announced once ntfy accepted the push, so failures retry next run.
 The very first run only records what is already in the feed and already finished in
@@ -110,6 +111,8 @@ class Config:
     rpc_user: str
     rpc_password: str
     ntfy_topic: str
+    dashboard_url: str = "http://127.0.0.1"  # the start page, which pushes to installed browsers
+    push_token_file: str = "/var/lib/torrent-box-dashboard/push-token"
 
 
 def _read_ini(path):
@@ -198,6 +201,9 @@ def load_config(config_path, secrets_path=None):
         rpc_user=get(secrets, secrets_path, "secrets", "rpc_user"),
         rpc_password=get(secrets, secrets_path, "secrets", "rpc_password"),
         ntfy_topic=get(secrets, secrets_path, "secrets", "ntfy_topic", "").strip(),
+        dashboard_url=get(conf, config_path, "push", "dashboard_url", "http://127.0.0.1").rstrip("/"),
+        push_token_file=get(conf, config_path, "push", "token_file",
+                            "/var/lib/torrent-box-dashboard/push-token"),
     )
 
 
@@ -513,18 +519,50 @@ class NotifyError(Exception):
 
 
 class Ntfy:
-    """Push notifications via ntfy (https://ntfy.sh or self-hosted). Disabled if no topic."""
+    """Push notifications: to the browsers the start page is installed in (best effort, when
+    this box has the start page's token) and via ntfy (https://ntfy.sh or self-hosted), when
+    there's a topic. Disabled if there's neither. Without a topic the start page is the only
+    way, and a push it didn't take is an error (so it's tried again)."""
 
-    def __init__(self, server, topic, timeout=30):
+    def __init__(self, server, topic, timeout=30, dashboard=None):
         self.server = server
         self.topic = topic
         self.timeout = timeout
+        self.dashboard = dashboard  # (the start page's address, the file with its token)
+
+    def token(self):
+        if not self.dashboard:
+            return ""
+        try:
+            return Path(self.dashboard[1]).read_text().strip()
+        except OSError:
+            return ""
 
     @property
     def enabled(self):
-        return bool(self.topic)
+        return bool(self.topic) or bool(self.token())
+
+    def send_dashboard(self, title, message):
+        """Hand the push to the start page; the reason why not, or "" when it took it."""
+        body = json.dumps({"title": title, "message": message}).encode()
+        req = urllib.request.Request(self.dashboard[0] + "/push/notify", data=body, headers={
+            "Content-Type": "application/json", "User-Agent": USER_AGENT,
+            "Authorization": f"Bearer {self.token()}"})
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                resp.read()
+        except urllib.error.HTTPError as e:
+            return f"the start page answered HTTP {e.code} {e.reason}"
+        except (urllib.error.URLError, OSError) as e:
+            return f"the start page is unreachable: {getattr(e, 'reason', e)}"
+        return ""
 
     def send(self, title, message, priority=3, tags=()):
+        failed = self.send_dashboard(title, message) if self.token() else "no start page token"
+        if not self.topic:
+            if failed:
+                raise NotifyError(failed)
+            return
         # JSON publishing (POST to the server root) rather than headers, so non-ASCII
         # titles like Hungarian release names survive.
         body = json.dumps({"topic": self.topic, "title": title, "message": message,
@@ -938,11 +976,13 @@ def main(argv=None):
     except ConfigError as e:
         log.error("%s", e)
         return 2
-    ntfy = Ntfy(cfg.ntfy_server, cfg.ntfy_topic, cfg.timeout)
+    ntfy = Ntfy(cfg.ntfy_server, cfg.ntfy_topic, cfg.timeout,
+                dashboard=(cfg.dashboard_url, cfg.push_token_file))
 
     if args.test_notify:
         if not ntfy.enabled:
-            log.error("no ntfy_topic in secrets.ini; notifications are off")
+            log.error("no ntfy_topic in secrets.ini and no start page to push through; "
+                      "notifications are off")
             return 2
         try:
             version = f"\ntorrent-box {VERSION}" if VERSION else ""
@@ -952,10 +992,10 @@ def main(argv=None):
         except NotifyError as e:
             log.error("%s", e)
             return 1
-        log.info("test push sent via %s", cfg.ntfy_server)
+        log.info("test push sent%s", f" via {cfg.ntfy_server}" if cfg.ntfy_topic else "")
         return 0
     if not ntfy.enabled:
-        log.info("no ntfy_topic in secrets.ini; notifications are off")
+        log.info("no ntfy_topic in secrets.ini and no start page to push through; notifications are off")
 
     args.state.parent.mkdir(parents=True, exist_ok=True)
     with open(args.state.with_suffix(".lock"), "w") as lock:

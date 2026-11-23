@@ -510,7 +510,9 @@ SCHEMAS = {  # field names as in the apps' TransmissionSettings.cs / SonarrSetti
             for impl in ("Sonarr", "Radarr", "Whisparr", "Lidarr")],
         "notification": [{"implementation": "Ntfy", "onHealthIssue": False, "fields": _fields(
             "serverUrl", "accessToken", "userName", "password", "priority", "topics", "tags",
-            "clickUrl")}],
+            "clickUrl")},
+            {"implementation": "Webhook", "onHealthIssue": False, "fields": _fields(
+                "url", "method", "username", "password", "headers")}],
         # ncore.yml's settings plus Cardigann's own
         "indexer": [{"implementation": "Cardigann", "definitionName": "ncore", "name": "nCore",
                      "enable": False, "appProfileId": 0, "fields": _fields(
@@ -589,13 +591,14 @@ class ArrConnectTest(unittest.TestCase):
     def setUp(self):
         self.state = {}  # what the state file keeps between runs
 
-    def connect(self, apis, password="pw", ncore=("bob", "npw", "123456")):
+    def connect(self, apis, password="pw", ncore=("bob", "npw", "123456"), ntfy=("https://ntfy.sh", "torrent-box-x"),
+                push=None):
         return list(sh.arr_connect(
             apis, {"sonarr": "skey", "radarr": "rkey", "prowlarr": "pkey", "whisparr": "wkey"},
             "alice", password, "/mnt/storage/downloads", "/mnt/storage/MISC",
             ["/mnt/storage/SERIES/HD/HU", "/mnt/storage/SERIES/HD/EN"],
-            ["/mnt/storage/MOVIES/HD/HU"], ncore, ("https://ntfy.sh", "torrent-box-x"),
-            self.state, ["/mnt/storage/XXX/HD", "/mnt/storage/XXX/SD"]))
+            ["/mnt/storage/MOVIES/HD/HU"], ncore, ntfy,
+            self.state, ["/mnt/storage/XXX/HD", "/mnt/storage/XXX/SD"], push))
 
     def test_first_run_sets_everything_up(self):
         apis = {n: FakeArr(n) for n in ("sonarr", "radarr", "prowlarr")}
@@ -656,6 +659,25 @@ class ArrConnectTest(unittest.TestCase):
         self.assertEqual((grabs["onGrab"], grabs["includeManualGrabs"], grabs["onHealthIssue"]),
                          (True, True, False))
         self.assertEqual(p.field("notification", "ntfy grabs (torrent-box)", "priority"), 2)
+
+    def test_start_page_webhooks_without_ntfy(self):
+        apis = {n: FakeArr(n) for n in ("sonarr", "radarr", "prowlarr")}
+        out = self.connect(apis, ntfy=None, push=("http://127.0.0.1", "tok"))
+        self.assertIn("prowlarr: health alerts to the start page: added", out)
+        self.assertIn("prowlarr: grabs to the start page: added", out)
+        p = apis["prowlarr"]
+        self.assertEqual([n["implementation"] for n in p.items["notification"]], ["Webhook", "Webhook"])
+        name = "start page health (torrent-box)"
+        self.assertEqual(p.field("notification", name, "url"), "http://127.0.0.1/push/prowlarr")
+        self.assertEqual(p.field("notification", name, "headers"),
+                         [{"key": "Authorization", "value": "Bearer tok"}])
+        health, grabs = p.items["notification"]
+        self.assertEqual((health["onHealthIssue"], health["onGrab"] if "onGrab" in health else None), (True, None))
+        self.assertEqual((grabs["onGrab"], grabs["onHealthIssue"]), (True, False))
+        # again: nothing changes; a new token is saved
+        self.assertTrue(all(l.endswith(": ok") for l in self.connect(apis, ntfy=None, push=("http://127.0.0.1", "tok"))))
+        out = self.connect(apis, ntfy=None, push=("http://127.0.0.1", "new"))
+        self.assertIn("prowlarr: health alerts to the start page: updated", out)
 
     def test_existing_ncore_is_left_alone(self):
         apis = {n: FakeArr(n) for n in ("sonarr", "radarr", "prowlarr")}
@@ -1100,6 +1122,7 @@ class FakeSeerr:
         self.calls, self.signin = [], None
         self.ntfy = {"enabled": False, "embedPoster": True, "types": 0,
                      "options": {"url": "", "topic": "", "tags": "", "priority": 3}}
+        self.webpush = {"enabled": False, "embedPoster": True, "options": {}}
         self.main = {"apiKey": "seerrkey", "applicationUrl": "", "applicationTitle": "Seerr"}
 
     def __call__(self, method, url, body=None, headers=None, opener=None, timeout=30):
@@ -1131,6 +1154,10 @@ class FakeSeerr:
             if method == "POST":
                 self.ntfy = body
             return self.ntfy
+        if path == "settings/notifications/webpush":
+            if method == "POST":
+                self.webpush = body
+            return self.webpush
         if path == "settings/main":
             if method == "POST":
                 if "apiKey" in body:
@@ -1174,6 +1201,24 @@ class SeerrSetupTest(unittest.TestCase):
         self.assertIn("requests and issues to ntfy: off", self.run_setup(fake, ntfy=("https://ntfy.sh", "topic3")))
         self.assertEqual(fake.ntfy["options"]["topic"], "topic2")
 
+    def test_web_push_without_ntfy(self):
+        fake = FakeSeerr()
+        out = self.run_setup(fake, ntfy=None)
+        self.assertIn("requests and issues to Web Push: added", out)
+        self.assertNotIn("requests and issues to ntfy: added", out)
+        self.assertEqual((fake.webpush["enabled"], fake.webpush["types"]), (True, 2 | 16 | 128 | 256))
+        self.assertIn("requests and issues to Web Push: ok", self.run_setup(fake, ntfy=None))
+        fake.webpush["types"] = 2            # your own choice stays
+        self.run_setup(fake, ntfy=None)
+        self.assertEqual(fake.webpush["types"], 2)
+        fake.webpush["enabled"] = False      # and so does switching it off
+        self.assertIn("requests and issues to Web Push: off", self.run_setup(fake, ntfy=None))
+        self.assertFalse(fake.webpush["enabled"])
+        # enabled by hand without types (the UI's switch alone): given the types
+        fake.webpush.update(enabled=True, types=None)
+        self.assertIn("requests and issues to Web Push: added", self.run_setup(fake, ntfy=None))
+        self.assertEqual(fake.webpush["types"], 2 | 16 | 128 | 256)
+
     def test_first_run(self):
         fake = FakeSeerr()
         out = self.run_setup(fake)
@@ -1197,7 +1242,7 @@ class SeerrSetupTest(unittest.TestCase):
             settings.write_text(json.dumps({"main": {"apiKey": "seerrkey"}}))
             out = self.run_setup(fake, settings)
         self.assertEqual(out, ["sonarr: ok", "radarr: ok", "application URL (http://box:5055): ok",
-                               "requests and issues to ntfy: ok"])
+                               "requests and issues to Web Push: ok", "requests and issues to ntfy: ok"])
         self.assertEqual(len(fake.arrs["sonarr"]), 1)
         self.assertNotIn("auth/jellyfin", [p for _, p, _ in fake.calls])
         self.assertTrue(all(k == "seerrkey" for _, p, k in fake.calls if p != "settings/public"))

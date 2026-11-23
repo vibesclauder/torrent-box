@@ -620,10 +620,11 @@ def transmission_fields(user, password):
 
 
 def arr_connect(apis, keys, rpc_user, rpc_password, downloads_dir, misc_dir, series_roots,
-                movie_roots, ncore=None, ntfy=None, state=None, xxx_roots=()):
+                movie_roots, ncore=None, ntfy=None, state=None, xxx_roots=(), push=None):
     """Connect the apps. apis: name -> ArrApi (Whisparr is connected if it's in there, and
     taken out of Prowlarr if not); keys: name -> API key; ncore: (user, password, 2FA code)
-    for Prowlarr's indexer; ntfy: (server, topic) for Prowlarr's health alerts; state: what
+    for Prowlarr's indexer; ntfy: (server, topic) and push: (the start page's address, its
+    token) for Prowlarr's health alerts and grabs; state: what
     earlier runs did (load_state), updated as it goes. Yields report lines."""
     state = {} if state is None else state
     tr = transmission_fields(rpc_user, rpc_password)
@@ -667,6 +668,19 @@ def arr_connect(apis, keys, rpc_user, rpc_password, downloads_dir, misc_dir, ser
     # Whisparr switched off (its container is gone): Prowlarr would keep reporting it down
     if "whisparr" not in apis and remove_item(apis["prowlarr"], "applications", "Whisparr"):
         yield "prowlarr: application Whisparr: removed"
+    if push:
+        # Prowlarr's webhooks to the start page, which pushes them to the browsers it's
+        # installed in. Their own items, since a notification's events are one set.
+        hook = {"url": f"{push[0]}/push/prowlarr", "method": 1,
+                "headers": [{"key": "Authorization", "value": f"Bearer {push[1]}"}]}
+        result = ensure_item(apis["prowlarr"], "notification", "start page health (torrent-box)",
+                             "Webhook", hook, extra={"onHealthIssue": True, "onHealthRestored": True,
+                                                     "includeHealthWarnings": False})
+        yield f"prowlarr: health alerts to the start page: {result}"
+        result = ensure_item(apis["prowlarr"], "notification", "start page grabs (torrent-box)",
+                             "Webhook", hook, extra={"onGrab": True, "includeManualGrabs": True,
+                                                     "onHealthIssue": False, "onHealthRestored": False})
+        yield f"prowlarr: grabs to the start page: {result}"
     if ntfy:
         # e.g. the nCore login failing once its session expires (new 2FA code needed)
         result = ensure_item(apis["prowlarr"], "notification", "ntfy (torrent-box)", "Ntfy",
@@ -712,11 +726,18 @@ def cmd_arr_connect(args):
         ncore = (os.environ["NCORE_USER"], os.environ["NCORE_PASSWORD"],
                  os.environ.get("NCORE_2FA", ""))
     ntfy = (args.ntfy_server, args.ntfy_topic) if args.ntfy_topic else None
+    push = None
+    if args.push_url and args.push_token_file:
+        try:
+            token = Path(args.push_token_file).read_text().strip()
+        except OSError:
+            token = ""
+        push = (args.push_url.rstrip("/"), token) if token else None
     state = load_state(args.arr_dir)
     try:
         for line in arr_connect(apis, keys, rpc_user, rpc_password, args.downloads_dir,
                                 args.misc_dir, args.series_root, args.movie_root, ncore, ntfy,
-                                state, args.xxx_root):
+                                state, args.xxx_root, push):
             print(line)
     finally:  # also what got done before an error, so the next run doesn't redo it
         save_state(args.arr_dir, state)
@@ -1087,6 +1108,23 @@ def seerr_ntfy(seerr, server, topic):
     return result
 
 
+def seerr_webpush(seerr):
+    """Seerr's own Web Push (to the devices each user subscribes in their profile), with the
+    same types as the ntfy pushes. Set up once: an agent that has types is left as you chose,
+    switched off included. Returns "added", "ok" or "off"."""
+    agent = seerr.call("GET", "settings/notifications/webpush") or {}
+    if agent.get("enabled"):
+        if agent.get("types"):
+            return "ok"
+        result = "added"
+    elif agent.get("types"):
+        return "off"
+    else:
+        result = "added"
+    seerr.call("POST", "settings/notifications/webpush", dict(agent, enabled=True, types=SEERR_PUSHES))
+    return result
+
+
 def seerr_app_url(seerr, url):
     """Seerr's application URL (its links in notifications), if it has none yet."""
     main = seerr.call("GET", "settings/main") or {}
@@ -1101,7 +1139,7 @@ def seerr_setup(settings_json, jf_user, jf_password, arr_keys, series_root, movi
                 ntfy=None, app_url="", base=SEERR):
     """Seerr's first-run setup (sign in with the Jellyfin admin, which makes it Seerr's admin;
     enable the movie and show libraries; finish), then Sonarr and Radarr, the application
-    URL and the ntfy pushes (ntfy: (server, topic)). On later runs only the last parts, with
+    URL and the pushes (Web Push, and ntfy if given: (server, topic)). On later runs only the last parts, with
     the API key. Yields report lines."""
     public = wait_for(f"{base}/api/v1/settings/public")
     key = seerr_api_key(settings_json)
@@ -1134,6 +1172,7 @@ def seerr_setup(settings_json, jf_user, jf_password, arr_keys, series_root, movi
             minimumAvailability="released")
     if app_url:
         yield f"application URL ({app_url}): {seerr_app_url(seerr, app_url)}"
+    yield f"requests and issues to Web Push: {seerr_webpush(seerr)}"
     if ntfy:
         yield f"requests and issues to ntfy: {seerr_ntfy(seerr, *ntfy)}"
     if not public.get("initialized"):
@@ -1539,6 +1578,8 @@ def main(argv=None):
     p.add_argument("--xxx-root", action="append", default=[], help="Whisparr's root folders")
     p.add_argument("--ntfy-server", default="https://ntfy.sh")
     p.add_argument("--ntfy-topic", default="")
+    p.add_argument("--push-url", default="", help="the start page's address, for Prowlarr's webhooks")
+    p.add_argument("--push-token-file", default="", help="the file with the start page's token")
     sub.add_parser("seerr-status")
     p = sub.add_parser("ncore-code", help="enter a fresh nCore 2FA code in Prowlarr")
     p.add_argument("--arr-dir", default=os.path.expanduser("~/.local/share/torrent-box/arr"))

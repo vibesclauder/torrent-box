@@ -191,6 +191,9 @@ timeout = 5
 [ntfy]
 server = {base_url}
 
+[push]
+token_file = {tmp / 'no-push-token'}
+
 [routes]
 {ROUTES}
 """)

@@ -617,6 +617,19 @@ class WebPushTest(unittest.TestCase):
             self.assertEqual(call("/push/notify", {"title": "Disk problem", "message": "m"},
                                   {"Authorization": f"Bearer {self.push.token}"})[0], 200)
         self.assertEqual(sent, [("Disk problem", "m", "")])
+        # Prowlarr's webhook: the same token, and its events worded as pushes
+        sent.clear()
+        auth = {"Authorization": f"Bearer {self.push.token}"}
+        with mock.patch.object(self.push, "send", lambda *a, **k: sent.append(a) or 1):
+            self.assertEqual(call("/push/prowlarr", {"eventType": "Health"})[0], 403)
+            for event in ({"eventType": "Health", "level": "error", "message": "nCore is down"},
+                          {"eventType": "HealthRestored", "message": "nCore is back"},
+                          {"eventType": "Grab", "release": {"releaseTitle": "Some.Show.S01", "indexer": "nCore"}},
+                          {"eventType": "ApplicationUpdate"}):
+                self.assertEqual(call("/push/prowlarr", event, auth)[0], 200)
+        self.assertEqual(sent, [("Prowlarr has a problem", "nCore is down", "prowlarr-health"),
+                                ("Prowlarr is fine again", "nCore is back", "prowlarr-health"),
+                                ("Added", "Some.Show.S01\nvia nCore", "")])
         self.assertEqual(call("/push/unsubscribe", {"endpoint": self.ENDPOINT}, ours)[0], 200)
         self.assertEqual(self.push.subs, [])
 

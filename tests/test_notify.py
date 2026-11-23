@@ -182,3 +182,62 @@ class NtfyAndCliTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StartPagePushTest(unittest.TestCase):
+    """Without an ntfy topic the start page is the way; with one it's an extra."""
+
+    def setUp(self):
+        import http.server
+        import json
+        import tempfile
+        import threading
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.token = Path(self.tmp.name) / "token"
+        self.token.write_text("secret\n")
+        self.got = []
+        test = self
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                body = self.rfile.read(int(self.headers["Content-Length"]))
+                test.got.append((self.path, self.headers.get("Authorization"), json.loads(body)))
+                self.send_response(200)
+                self.send_header("Content-Length", "2")
+                self.end_headers()
+                self.wfile.write(b"{}")
+
+            def log_message(self, *args):
+                pass
+        self.httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+        self.addCleanup(self.httpd.server_close)
+        self.addCleanup(self.httpd.shutdown)
+        self.url = "http://%s:%d" % self.httpd.server_address
+
+    def ntfy(self, topic="", server="http://127.0.0.1:9", dashboard_url=None):
+        return r2t.Ntfy(server, topic, timeout=2, dashboard=(dashboard_url or self.url, str(self.token)))
+
+    def test_the_start_page_takes_it_when_there_is_no_topic(self):
+        n = self.ntfy()
+        self.assertTrue(n.enabled)
+        n.send("Added", "A torrent")
+        self.assertEqual(self.got, [("/push/notify", "Bearer secret", {"title": "Added", "message": "A torrent"})])
+
+    def test_off_without_a_topic_or_a_token(self):
+        self.token.unlink()
+        self.assertFalse(self.ntfy().enabled)
+        self.assertTrue(self.ntfy("topic").enabled)
+
+    def test_a_start_page_that_is_down_is_an_error_without_a_topic(self):
+        with self.assertRaises(r2t.NotifyError):
+            self.ntfy(dashboard_url="http://127.0.0.1:9").send("T", "M")
+
+    def test_with_a_topic_both_get_it_and_a_down_start_page_is_ignored(self):
+        n = self.ntfy("topic", server=self.url)
+        n.send("T", "M")
+        self.assertEqual([g[0] for g in self.got], ["/push/notify", "/"])
+        self.got.clear()
+        self.ntfy("topic", server=self.url, dashboard_url="http://127.0.0.1:9").send("T", "M")
+        self.assertEqual([g[0] for g in self.got], ["/"])

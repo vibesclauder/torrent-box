@@ -50,6 +50,9 @@ DESIREERR_DATA=$ARR_DIR/desireerr/data  # its settings, users and requests (its 
 OLD_DESIREERR_DATA=$HOME/.local/state/desireerr
 OLD_DESIREERR_CACHE=$HOME/.cache/desireerr/images
 LIB=/usr/local/lib/torrent-box  # root's scripts: push, smartd-notify, arr-update
+PUSH_TOKEN_FILE=/var/lib/torrent-box-dashboard/push-token  # the start page's push token: for the
+# jobs that hand it their pushes (push, rss2transmission, Prowlarr's webhooks); made here so it
+# exists before the page first runs, and owned by you, who the page runs as
 NTFY_PUBLIC=https://ntfy.sh
 NTFY_PORT=2586  # our own ntfy server ([setup] own_ntfy = yes); 80 is the start page's
 NTFY_LOCAL=http://localhost:$NTFY_PORT  # what everything on the box pushes to (the apps too: host networking)
@@ -99,6 +102,9 @@ Answers can be given as environment variables instead of prompts:
   TS_AUTHKEY     Tailscale auth key, to join the tailnet without opening a login link
   TAILSCALE_HTTPS  yes or no: the start page and web apps also over HTTPS on the tailnet
                  (with TAILSCALE=yes; asked once, later: config.ini [setup])
+  NTFY           yes or no: push through ntfy as well as to the browsers the start page is
+                 installed in (asked once; default no with TAILSCALE_HTTPS, else yes; a box
+                 that has a topic keeps it; later: config.ini [setup])
   OWN_NTFY       yes or no: pushes through an ntfy server on this box instead of ntfy.sh
                  (asked once, later: config.ini [setup])
   ARR            yes or no: Prowlarr, Sonarr, Radarr and Seerr in Docker (first run only)
@@ -764,8 +770,49 @@ choose_tailscale_https() {
     case $tailscale_https in yes|no) ;; *) die "tailscale_https must be yes or no, not '$tailscale_https'" ;; esac
 }
 
-# Asked also on a box that already has the others (it came later).
+# Pushes go to the browsers the start page is installed in (Web Push: needs HTTPS, so the
+# Tailscale one). ntfy is the extra: on by default where that isn't there, and on a box that
+# has a topic or an own server already. Asked also on a box that already has the others.
 choose_own_ntfy() {
+    local saved default=yes topic
+    [[ $tailscale_https != yes ]] || default=no
+    topic=$(ini "$SECRETS" secrets ntfy_topic)
+    [[ $topic != *"<"* ]] || topic=""
+    saved=$(ini "$config_src" setup ntfy)
+    if [[ -n $saved ]]; then
+        ntfy=$saved
+        if [[ -n ${NTFY:-} && $NTFY != "$saved" ]]; then
+            warn "ignoring NTFY=$NTFY: $CONFIG says $saved (change [setup] ntfy there to switch)"
+        fi
+    elif [[ -n ${NTFY:-} ]]; then
+        ntfy=$NTFY
+    elif [[ -n $topic || -n $(ini "$config_src" setup own_ntfy) ]]; then
+        ntfy=yes  # a box that has it: stays as it was
+    elif (( DRY_RUN )); then
+        ntfy=$default
+        step "Notifications"
+        info "would ask whether to push through ntfy as well (default $default); assuming $default below"
+    else
+        step "Notifications"
+        info "pushes reach the phone the start page is installed on (open it over HTTPS and tap"
+        info "'Notify this device'), and Seerr and Desireerr push to devices themselves."
+        info "ntfy is the extra way, for a phone without that, or at home without HTTPS."
+        if [[ $default == yes ]]; then
+            if ask_yes "Push through ntfy as well?"; then ntfy=yes; else ntfy=no; fi
+        else
+            if ask_no "Push through ntfy as well?"; then ntfy=yes; else ntfy=no; fi
+        fi
+    fi
+    case $ntfy in yes|no) ;; *) die "ntfy must be yes or no, not '$ntfy'" ;; esac
+    if [[ $ntfy == no && -z $topic ]]; then
+        own_ntfy=no
+        return
+    fi
+    choose_own_ntfy_server
+}
+
+# Whether the ntfy to push through runs on this box. Asked also on a box that has the others.
+choose_own_ntfy_server() {
     local saved default=no
     [[ $tailscale != yes ]] || default=yes
     saved=$(ini "$config_src" setup own_ntfy)
@@ -778,14 +825,12 @@ choose_own_ntfy() {
         own_ntfy=$OWN_NTFY
     elif (( DRY_RUN )); then
         own_ntfy=$default
-        step "Notifications"
         info "would ask whether to run an own ntfy server (default $default); assuming $default below"
     else
-        step "Notifications"
-        info "pushes go through ntfy: the public ntfy.sh, whose operator can read them (torrent"
-        info "names, requests), or an ntfy server on this box that only the LAN and the tailnet"
-        info "reach. With your own, the phone gets them while it's on the tailnet (Tailscale on)"
-        info "or at home; what it missed comes when it's back (kept 3 days)."
+        info "ntfy is the public ntfy.sh, whose operator can read the pushes (torrent names,"
+        info "requests), or a server on this box that only the LAN and the tailnet reach. With"
+        info "your own, the phone gets them while it's on the tailnet (Tailscale on) or at home;"
+        info "what it missed comes when it's back (kept 3 days)."
         if [[ $default == yes ]]; then
             if ask_yes "Run your own ntfy server?"; then own_ntfy=yes; else own_ntfy=no; fi
         else
@@ -1111,6 +1156,8 @@ setup_secrets() {
     [[ $ntfy_topic != *"<"* ]] || ntfy_topic=""
     if [[ -n $ntfy_topic ]]; then
         info "ntfy topic: already set"
+    elif [[ $ntfy == no ]]; then
+        info "no ntfy topic: pushes go to the browsers the start page is installed in ([setup] ntfy = no)"
     else
         ntfy_topic=$(helper random-topic)
         updates+=("ntfy_topic=$ntfy_topic")
@@ -1165,7 +1212,7 @@ setup_config() {
     fi
     # Remember the choices, so re-runs don't ask again.
     local key updates=()
-    for key in media_server samba avahi tailscale tailscale_https own_ntfy arr whisparr download_mbps; do
+    for key in media_server samba avahi tailscale tailscale_https ntfy own_ntfy arr whisparr download_mbps; do
         [[ $key != tailscale_https || $tailscale == yes ]] || continue  # asked once Tailscale is on
         [[ $(ini "$CONFIG" setup "$key") == "${!key}" ]] || updates+=("$key=${!key}")
     done
@@ -1659,6 +1706,8 @@ setup_ntfy() {
         if [[ -f $NTFY_DROPIN ]] && systemctl is-enabled -q ntfy 2>/dev/null; then
             as_root systemctl disable --now ntfy
             info "own_ntfy = no: our ntfy server is stopped (the package stays); pushes go to $ntfy_server"
+        elif [[ -z ${ntfy_topic:-} ]]; then
+            info "not used ([setup] ntfy = no in $CONFIG): pushes go to the browsers the start page is installed in"
         else
             info "not used ([setup] own_ntfy = no in $CONFIG): pushes go to $ntfy_server"
         fi
@@ -1737,10 +1786,21 @@ ntfy_repo() {
 
 ### 9b. Disk health
 
+ensure_push_token() {
+    [[ ! -s $PUSH_TOKEN_FILE ]] || return 0
+    if (( DRY_RUN )); then
+        info "would make the start page's push token ($PUSH_TOKEN_FILE)"
+        return 0
+    fi
+    python3 -c 'import secrets; print(secrets.token_urlsafe(24))' >"$TMP/push-token"
+    as_root install -D -m 600 -o "$USER" "$TMP/push-token" "$PUSH_TOKEN_FILE"
+}
+
 # The root jobs' way to push to your ntfy topic (it holds the topic: root-only).
 install_push() {
-    [[ -n ${ntfy_topic:-} ]] || return 0
-    helper render "$REPO/templates/push" "NTFY_URL=$ntfy_server/$ntfy_topic" "DASHBOARD_URL=http://127.0.0.1:$DASHBOARD_PORT" >"$TMP/push"
+    local ntfy_url=""
+    [[ -z ${ntfy_topic:-} ]] || ntfy_url=$ntfy_server/$ntfy_topic
+    helper render "$REPO/templates/push" "NTFY_URL=$ntfy_url" "DASHBOARD_URL=http://127.0.0.1:$DASHBOARD_PORT" >"$TMP/push"
     update_file "$TMP/push" "$LIB/push" 700 root || true
 }
 
@@ -1866,18 +1926,20 @@ setup_arr() {
     fi
     if (( DRY_RUN )); then
         info "would connect them: logins ('$rpc_user'), Transmission as download client, Sonarr and"
-        info "Radarr to Prowlarr, HUN custom format, nCore indexer, Prowlarr alerts to ntfy,"
+        info "Radarr to Prowlarr, HUN custom format, nCore indexer, Prowlarr alerts to the start page,"
         [[ $whisparr != yes ]] || info "and Whisparr: login, Transmission, Prowlarr's XXX categories"
         info "root folders: $(printf '%s\n' "${roots[@]}" | grep -v '^--' | paste -sd ' ')"
         [[ $media_server != jellyfin ]] || info "would set up Seerr with Jellyfin, Sonarr and Radarr (first run)"
         return
     fi
     info "connecting them (waits for the apps to start)"
+    ensure_push_token
     ncore_2fa
     if ! RPC_USER=$rpc_user RPC_PASSWORD=$rpc_password NCORE_USER=${ncore_user:-} \
             NCORE_PASSWORD=${ncore_password:-} NCORE_2FA=${ncore_code:-} \
             helper arr-connect --arr-dir "$ARR_DIR" --downloads-dir "$storage_root/downloads" \
             --misc-dir "$download_dir" --ntfy-server "$ntfy_server" --ntfy-topic "$ntfy_topic" \
+            --push-url "http://127.0.0.1:$DASHBOARD_PORT" --push-token-file "$PUSH_TOKEN_FILE" \
             "${roots[@]}" | report ""; then
         die "could not connect the apps; see the error above"
     fi
@@ -2158,6 +2220,8 @@ setup_dashboard() {
     step "Start page (http://$(hostname)/)"
     local changed=0
     apt_install python3-cryptography  # pushes to the browsers it's installed in (Web Push)
+    ensure_push_token
+    install_push  # the root jobs' way to push: through this page, and ntfy if there's a topic
     if update_file "$(stamped "$REPO/dashboard.py")" "$DASHBOARD_BIN" 755 root; then changed=1; fi
     # The commit, its date and the checkout, for the update check: read when needed, so a new
     # commit alone needs no restart, and isn't listed as a change.
@@ -2405,7 +2469,7 @@ finish() {
     elif [[ ! -s $TMP/changes ]]; then  # nothing new to say, nothing to check
         info "not sent: this run changed nothing"
     elif ! "$BIN" -c "$CONFIG" --test-notify; then
-        warn "the test push failed; check the network and [ntfy] server in $CONFIG"
+        warn "the test push failed; check the start page (journalctl -u torrent-box-dashboard) and, with ntfy, the network and [ntfy] server in $CONFIG"
     fi
 
     step "Summary"
@@ -2470,7 +2534,10 @@ finish() {
             info "Tailscale:              not connected (${ts_state:-not running})"
         fi
     fi
-    if [[ $own_ntfy != yes ]]; then
+    if [[ -z $ntfy_topic ]]; then
+        info "Pushes:                 open the start page over HTTPS (the Tailscale name) on the phone and tap"
+        info "                        'Notify this device' at the bottom; Seerr and Desireerr: Settings, Notifications"
+    elif [[ $own_ntfy != yes ]]; then
         info "ntfy: subscribe to '$ntfy_topic' in the ntfy app, or open $ntfy_server/$ntfy_topic"
     elif [[ $tailscale == yes && ${ts_state:-} == Running ]]; then
         info "ntfy (own server):      in the ntfy app, + → Use another server: http://$ts_name:$NTFY_PORT"

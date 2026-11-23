@@ -1,7 +1,8 @@
 #!/bin/sh
-# torrent-box: push TITLE MESSAGE [PRIORITY] [TAGS] -> a push to your ntfy topic, for the
-# root jobs (smartd's disk warnings, the weekly app update). Installed by setup.sh to
-# /usr/local/lib/torrent-box/push, readable by root only since it holds the topic.
+# torrent-box: push TITLE MESSAGE [PRIORITY] [TAGS] -> a push to the browsers the start page is
+# installed in and, if there's an ntfy topic, to it too, for the root jobs (smartd's disk
+# warnings, the weekly app update). Installed by setup.sh to /usr/local/lib/torrent-box/push,
+# readable by root only since it holds the topic.
 [ $# -ge 2 ] || { echo "usage: push TITLE MESSAGE [PRIORITY] [TAGS]" >&2; exit 2; }
 title=$(printf '%s' "$1" | tr -d '\r\n')
 # the start page pushes it to the browsers it's installed in too (best effort; the token is in
@@ -12,5 +13,7 @@ if [ -n "$token" ]; then
         "$title" "$2" | curl -fsS --max-time 10 -o /dev/null -H "Authorization: Bearer $token" \
         -H "Content-Type: application/json" --data-binary @- "@DASHBOARD_URL@/push/notify" || true
 fi
+# no ntfy topic: the start page's push was all there is
+[ -n "@NTFY_URL@" ] || exit 0
 exec curl -fsS --max-time 30 -o /dev/null -H "Title: $title" -H "Priority: ${3:-high}" \
     -H "Tags: ${4:-warning}" --data-binary "$2" "@NTFY_URL@"

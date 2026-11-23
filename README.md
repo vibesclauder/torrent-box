@@ -52,8 +52,8 @@ and then:
 - installs transmission-daemon, python3, curl, the chosen media server, and Samba (with
   wsdd), avahi, Tailscale and Docker with the apps (those that are wanted),
 - writes `~/.config/rss2transmission/secrets.ini` (mode 600) with a freshly generated ntfy
-  topic (it prints the topic: subscribe to it in the ntfy phone app), and with
-  `own_ntfy = yes` runs an ntfy server on the box ([below](#own-ntfy-server)),
+  topic (it prints the topic: subscribe to it in the ntfy phone app) if you want ntfy, and
+  with `own_ntfy = yes` runs an ntfy server on the box ([below](#ntfy-and-an-own-ntfy-server)),
 - creates `config.ini` from `config.example.ini` and the download folders from `[routes]`,
 - merges its keys into Transmission's `settings.json` (your other settings are kept):
   partial downloads go to `<storage>/.incomplete` and are moved into their folder when done
@@ -386,10 +386,14 @@ Check it from their device (Tailscale on, Wi-Fi off): Jellyfin and Seerr open;
 time out. To take the access away, remove the user in the Tailscale admin console (Users),
 and delete their Jellyfin and Seerr accounts.
 
-## Own ntfy server
+## ntfy, and an own ntfy server
 
-All pushes (rss2transmission, the start page, the disk, Prowlarr, Seerr, the weekly app
-update) go through [ntfy](https://ntfy.sh). On the public ntfy.sh the topic is the only
+Every push (rss2transmission, the start page, the disk, Prowlarr, the weekly app update) goes
+to the browsers the start page is installed in ([above](#pushes-to-the-phone-its-installed-on)),
+and to [ntfy](https://ntfy.sh) as well if you want it: `[setup] ntfy = yes` (asked once; the
+default is no where the Tailscale HTTPS is on, since the installed page needs that, and yes
+elsewhere; a box that already has a topic keeps it). With `ntfy = no` no topic is made. Seerr
+pushes with its own Web Push, Prowlarr through webhooks to the start page. On the public ntfy.sh the topic is the only
 password, and the operator can read every push: torrent names, requests, nCore problems.
 With `[setup] own_ntfy = yes` (asked once, default yes with Tailscale) setup runs ntfy on the
 box instead, from ntfy's own apt repository (archive.ntfy.sh, the key checked against the
@@ -433,8 +437,9 @@ Home Screen first) and tap **Notify this device** in the footer; it sends a test
   that token, and it's best effort: ntfy stays the one that must arrive.
 - Like the rest of the page, anyone on the LAN or tailnet can subscribe a device. The box only
   ever pushes to Google's, Mozilla's, Apple's and Microsoft's push services.
-- Seerr and Desireerr push to devices themselves (Settings, Notifications in each); they don't
-  go through the start page.
+- Seerr (Web Push on, for requests and issues; each user subscribes in their profile, with
+  Seerr's application URL set to its HTTPS address) and Desireerr push to devices
+  themselves; Prowlarr's health alerts and grabs reach the start page through webhooks.
 
 ## Search and requests (Prowlarr, Sonarr, Radarr, Seerr)
 

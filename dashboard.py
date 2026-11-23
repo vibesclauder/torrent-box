@@ -1597,6 +1597,26 @@ class WebPush:
             raise ValueError("it didn't reach any device")
 
 
+def prowlarr_push(event):
+    """A push for what Prowlarr's webhook posts: (title, message, tag), or None for what isn't
+    worth one (its other event types)."""
+    kind = event.get("eventType")
+    if kind == "Health":
+        level = "needs a look" if event.get("level") == "warning" else "has a problem"
+        return f"Prowlarr {level}", str(event.get("message") or ""), "prowlarr-health"
+    if kind == "HealthRestored":
+        return "Prowlarr is fine again", str(event.get("message") or event.get("previousMessage") or ""), \
+            "prowlarr-health"
+    if kind == "Grab":
+        release = event.get("release") or {}
+        indexer = release.get("indexer")
+        return "Added", "\n".join(x for x in (release.get("releaseTitle"), f"via {indexer}" if indexer else "")
+                                 if x), ""
+    if kind == "Test":
+        return "torrent-box", "Prowlarr can push through the start page.", "prowlarr-test"
+    return None
+
+
 # Set in main(): the start page's own pushes go to subscribed browsers as well as to ntfy.
 WEBPUSH = None
 
@@ -3012,7 +3032,8 @@ class Handler(BaseHTTPRequestHandler):
                 return
             self.proxy_transmission(self.rfile.read(length))
             return
-        if self.path in ("/push/subscribe", "/push/unsubscribe", "/push/test", "/push/notify"):
+        if self.path in ("/push/subscribe", "/push/unsubscribe", "/push/test", "/push/notify",
+                         "/push/prowlarr"):
             self.push_post(self.path)
             return
         if self.path != "/ncore-code" or not load_settings(self.status.config)["arr"]:
@@ -3051,7 +3072,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_error(400)
             return
         raw = self.rfile.read(length)
-        if path == "/push/notify":
+        if path in ("/push/notify", "/push/prowlarr"):
             given = (self.headers.get("Authorization") or "").removeprefix("Bearer ")
             if not push.token or not hmac.compare_digest(given.encode(), push.token.encode()):
                 self.send_error(403)
@@ -3071,6 +3092,9 @@ class Handler(BaseHTTPRequestHandler):
                 push.unsubscribe(str(body.get("endpoint") or ""))
             elif path == "/push/test":
                 push.test()
+            elif path == "/push/prowlarr":
+                if (found := prowlarr_push(body)):
+                    push.send(*found)
             else:
                 push.send(str(body.get("title") or "torrent-box"), str(body.get("message") or ""),
                           str(body.get("tag") or ""))
