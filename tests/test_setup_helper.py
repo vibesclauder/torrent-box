@@ -679,6 +679,16 @@ class ArrConnectTest(unittest.TestCase):
         out = self.connect(apis, ntfy=None, push=("http://127.0.0.1", "new"))
         self.assertIn("prowlarr: health alerts to the start page: updated", out)
 
+    def test_ntfy_switched_off_removes_its_connections(self):
+        apis = {n: FakeArr(n) for n in ("sonarr", "radarr", "prowlarr")}
+        self.connect(apis)
+        self.assertEqual(len(apis["prowlarr"].items["notification"]), 2)
+        out = self.connect(apis, ntfy=None)
+        self.assertIn("prowlarr: health alerts to ntfy: removed", out)
+        self.assertIn("prowlarr: grabs to ntfy: removed", out)
+        self.assertEqual(apis["prowlarr"].items["notification"], [])
+        self.assertFalse(any("ntfy" in l for l in self.connect(apis, ntfy=None)))
+
     def test_existing_ncore_is_left_alone(self):
         apis = {n: FakeArr(n) for n in ("sonarr", "radarr", "prowlarr")}
         self.connect(apis)
@@ -1218,6 +1228,14 @@ class SeerrSetupTest(unittest.TestCase):
         fake.webpush.update(enabled=True, types=None)
         self.assertIn("requests and issues to Web Push: added", self.run_setup(fake, ntfy=None))
         self.assertEqual(fake.webpush["types"], 2 | 16 | 128 | 256)
+
+    def test_ntfy_off_switches_the_agent_off(self):
+        fake = FakeSeerr()
+        self.run_setup(fake)                                   # on, with a topic
+        out = self.run_setup(fake, ntfy=None)
+        self.assertIn("requests and issues to ntfy: switched off", out)
+        self.assertFalse(fake.ntfy["enabled"])
+        self.assertNotIn("requests and issues to ntfy: switched off", self.run_setup(fake, ntfy=None))
 
     def test_first_run(self):
         fake = FakeSeerr()

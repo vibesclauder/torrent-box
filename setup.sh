@@ -804,7 +804,7 @@ choose_own_ntfy() {
         fi
     fi
     case $ntfy in yes|no) ;; *) die "ntfy must be yes or no, not '$ntfy'" ;; esac
-    if [[ $ntfy == no && -z $topic ]]; then
+    if [[ $ntfy == no ]]; then  # off: no server and no topic anywhere (setup_secrets, the apps)
         own_ntfy=no
         return
     fi
@@ -1154,10 +1154,16 @@ setup_secrets() {
 
     ntfy_topic=$(ini "$SECRETS" secrets ntfy_topic)
     [[ $ntfy_topic != *"<"* ]] || ntfy_topic=""
-    if [[ -n $ntfy_topic ]]; then
+    if [[ $ntfy == no ]]; then
+        if [[ -n $ntfy_topic ]]; then
+            updates+=("ntfy_topic=")
+            info "ntfy is off ([setup] ntfy = no): the topic is taken out of secrets.ini and the apps' ntfy pushes are removed"
+            ntfy_topic=""
+        else
+            info "no ntfy topic: pushes go to the browsers the start page is installed in ([setup] ntfy = no)"
+        fi
+    elif [[ -n $ntfy_topic ]]; then
         info "ntfy topic: already set"
-    elif [[ $ntfy == no ]]; then
-        info "no ntfy topic: pushes go to the browsers the start page is installed in ([setup] ntfy = no)"
     else
         ntfy_topic=$(helper random-topic)
         updates+=("ntfy_topic=$ntfy_topic")

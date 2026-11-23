@@ -704,6 +704,10 @@ def arr_connect(apis, keys, rpc_user, rpc_password, downloads_dir, misc_dir, ser
                              extra={"onGrab": True, "includeManualGrabs": True,
                                     "onHealthIssue": False, "onHealthRestored": False})
         yield f"prowlarr: grabs to ntfy: {result}"
+    else:  # ntfy switched off ([setup] ntfy = no): its connections go
+        for name, what in (("ntfy (torrent-box)", "health alerts"), ("ntfy grabs (torrent-box)", "grabs")):
+            if remove_item(apis["prowlarr"], "notification", name):
+                yield f"prowlarr: {what} to ntfy: removed"
     state["login"] = login_fingerprint(rpc_user, rpc_password)  # only once all have it
 
 
@@ -1115,6 +1119,15 @@ def seerr_ntfy(seerr, server, topic):
     return result
 
 
+def seerr_ntfy_off(seerr):
+    """Switch Seerr's ntfy agent off (ntfy is off for the box); whether it was on."""
+    agent = seerr.call("GET", "settings/notifications/ntfy") or {}
+    if not agent.get("enabled"):
+        return False
+    seerr.call("POST", "settings/notifications/ntfy", dict(agent, enabled=False))
+    return True
+
+
 def seerr_webpush(seerr):
     """Seerr's own Web Push (to the devices each user subscribes in their profile), with the
     same types as the ntfy pushes. Set up once: an agent that has types is left as you chose,
@@ -1182,6 +1195,8 @@ def seerr_setup(settings_json, jf_user, jf_password, arr_keys, series_root, movi
     yield f"requests and issues to Web Push: {seerr_webpush(seerr)}"
     if ntfy:
         yield f"requests and issues to ntfy: {seerr_ntfy(seerr, *ntfy)}"
+    elif seerr_ntfy_off(seerr):
+        yield "requests and issues to ntfy: switched off"
     if not public.get("initialized"):
         seerr.call("POST", "settings/initialize")
         yield "setup finished"
