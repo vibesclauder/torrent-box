@@ -2485,6 +2485,10 @@ setup_firewall() {
         as_root ufw allow from "$lan_net" to any port 22 proto tcp comment 'torrent-box: SSH'
         [[ $tailscale != yes ]] ||
             as_root ufw allow in on tailscale0 to any port 22 proto tcp comment 'torrent-box: SSH from the tailnet'
+        # <box>.local often resolves to IPv6 link-local addresses, which a PC then connects to
+        if grep -q '^IPV6=yes' /etc/default/ufw 2>/dev/null; then
+            as_root ufw allow from fe80::/10 to any port 22 proto tcp comment 'torrent-box: SSH (IPv6 link-local)'
+        fi
     fi
     as_root ufw allow 51413/tcp comment 'torrent-box: BitTorrent'
     as_root ufw allow 51413/udp comment 'torrent-box: BitTorrent'
