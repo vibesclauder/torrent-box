@@ -454,7 +454,7 @@ Home Screen first) and tap **Notify this device** in the footer; it sends a test
 `python3-cryptography` (setup installs it); without it the link doesn't show.
 
 **Recent notifications** on the start page lists those pushes again, the last 10 of the past
-24 hours (newest on its folded line; opened, it stays open on that browser), whether or not a
+24 hours (folded: how many, and how long ago the latest came; opened, it stays open on that browser), whether or not a
 device is subscribed. Test pushes aren't listed, and neither are pushes that go only to ntfy
 (Seerr's, Desireerr's, or the root jobs' when the start page is down).
 

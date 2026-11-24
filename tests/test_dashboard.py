@@ -591,10 +591,16 @@ class WebPushTest(unittest.TestCase):
 
     def test_recent_pushes_on_the_page(self):
         self.assertEqual(db.recent_html([]), "")
-        page = db.recent_html([{"time": 1000, "title": "Added <b>", "message": "a\nvia nCore"}])
+        page = db.recent_html([{"time": 1000, "title": "Added <b>", "message": "A.Show_S01\nvia nCore"}],
+                              now=1000 + 300)
         self.assertIn("Added &lt;b&gt;", page)
-        self.assertIn("<p>a\nvia nCore</p>", page)
+        self.assertIn("<p>A.<wbr>Show_<wbr>S01\nvia nCore</p>", page)
+        self.assertIn("<b>1 notification</b>", page)
+        self.assertIn("latest 5 min ago", page)
         self.assertIn('data-fold="recent"', page)
+        self.assertEqual([db.recent_kind(t) for t in ("Jellyfin is down", "Sonarr needs a look",
+                                                      "Jellyfin is fine again", "Added")],
+                         [db.DOWN, db.WARN, db.OK, ""])
 
     def test_test_push_is_rate_limited(self):
         with self.assertRaises(ValueError):

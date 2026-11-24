@@ -2026,16 +2026,17 @@ color:var(--muted);margin:0;white-space:nowrap}
 padding:6px 10px 10px;border-top:1px solid var(--line)}
 .others{background:var(--card);border:1px solid var(--line);border-radius:14px;box-shadow:var(--shadow)}
 .recent{background:var(--card);border:1px solid var(--line);border-radius:14px;box-shadow:var(--shadow)}
-.recent>summary{display:flex;align-items:baseline;gap:10px;padding:12px 16px;cursor:pointer;list-style:none}
+.recent>summary{display:flex;align-items:center;gap:12px;padding:10px 16px;cursor:pointer;list-style:none}
 .recent>summary::-webkit-details-marker{display:none}
-.recent>summary b{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.recent>summary .muted{margin-left:auto;white-space:nowrap}
+.recent>summary .latest{margin-left:auto;white-space:nowrap}
 .recent[open]>summary .chev{transform:rotate(90deg)}
-.recent ul{list-style:none;margin:0;padding:0;display:grid;grid-template-columns:auto minmax(0,1fr)}
-.recent li{grid-column:1/-1;display:grid;grid-template-columns:subgrid;column-gap:12px;padding:10px 16px;
-border-top:1px solid var(--line)}
-.recent li time{color:var(--muted);font-size:13px;font-variant-numeric:tabular-nums;padding-top:1px}
-.recent li p{margin:2px 0 0;color:var(--muted);font-size:13px;white-space:pre-line;overflow-wrap:anywhere}
+.recent ul{list-style:none;margin:0;padding:0}
+.recent li{display:grid;grid-template-columns:10px minmax(0,1fr) auto;align-items:center;gap:2px 12px;
+padding:10px 16px;border-top:1px solid var(--line)}
+.recent li .dot{width:8px;height:8px;box-shadow:none}
+.recent li .dot:not(.ok):not(.warn):not(.down){background:var(--accent)}
+.recent li time{color:var(--muted);font-size:12px;font-variant-numeric:tabular-nums;white-space:nowrap}
+.recent li p{grid-column:2/-1;margin:0;color:var(--muted);font-size:13px;white-space:pre-line;overflow-wrap:break-word}
 .others .apps{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:2px 10px;padding:6px 10px}
 .badge.other{background:linear-gradient(135deg,#64748b,#334155)}
 .app{display:flex;gap:10px;align-items:center;padding:8px;border-radius:10px;color:inherit;text-decoration:none}
@@ -2697,21 +2698,46 @@ addEventListener("message",ev=>{
 """
 
 
-def recent_html(recent):
-    """The recent pushes, folded: one line with the newest until opened."""
+def recent_kind(title):
+    """A push's dot, guessed from its title (the pushes carry no state of their own)."""
+    t = title.lower()
+    if t.endswith(("is down", "has a problem", "not mounted")):
+        return DOWN
+    if t.endswith("fine again"):
+        return OK
+    if "needs a look" in t or "warning" in t or "full" in t:
+        return WARN
+    return ""
+
+
+def ago(seconds):
+    if seconds < 60:
+        return "just now"
+    if seconds < 3600:
+        return f"{int(seconds // 60)} min ago"
+    return f"{int(seconds // 3600)} h ago"
+
+
+def recent_html(recent, now=None):
+    """The recent pushes, folded: how many and how fresh until opened, then one row each."""
     if not recent:
         return ""
     e = html.escape
+    now = time.time() if now is None else now
     items = []
     for x in recent:
-        message = f'<p>{e(x["message"])}</p>' if x["message"] else ""
-        items.append(f'<li><time class="short" datetime="{time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(x["time"]))}">'
-                     f'{time.strftime("%H:%M", time.localtime(x["time"]))}</time>'
-                     f'<div><b>{e(x["title"])}</b>{message}</div></li>')
+        # release names break at their dots, not in the middle of a word
+        text = e(x["message"]).replace(".", ".<wbr>").replace("_", "_<wbr>")
+        message = f"<p>{text}</p>" if x["message"] else ""
+        stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(x["time"]))
+        items.append(f'<li><i class="dot {recent_kind(x["title"])}"></i><b>{e(x["title"])}</b>'
+                     f'<time class="short" datetime="{stamp}">{time.strftime("%H:%M", time.localtime(x["time"]))}</time>'
+                     f'{message}</li>')
     n = len(recent)
     return (f'<h2>Recent notifications</h2><details class="recent" data-fold="recent"><summary>'
-            f'<span class="chev">›</span><b>{e(recent[0]["title"])}</b>'
-            f'<span class="muted">{n} in the last {RECENT_FOR // 3600} hours</span></summary>'
+            f'<span class="chev">›</span><span><b>{n} notification{"s" if n > 1 else ""}</b> '
+            f'<span class="muted why">in the last {RECENT_FOR // 3600} hours</span></span>'
+            f'<span class="muted latest">latest {ago(now - recent[0]["time"])}</span></summary>'
             f'<ul>{"".join(items)}</ul></details>')
 
 
