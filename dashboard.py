@@ -31,6 +31,7 @@ import os
 import re
 import secrets
 import socket
+import ssl
 import subprocess
 import sys
 import threading
@@ -2961,6 +2962,7 @@ class Handler(BaseHTTPRequestHandler):
     server_version = "torrent-box-dashboard"
     status = None  # set in main()
     webpush = None  # set in main()
+    tls = False  # TLSHandler: the page over HTTPS
 
     def do_GET(self):
         path = self.path.split("?", 1)[0]
@@ -2979,6 +2981,14 @@ class Handler(BaseHTTPRequestHandler):
             kind = "text/html; charset=utf-8"
         elif path.startswith("/open/") and path[6:] in self.status.get()["checks"] \
                 and any(t[0] == path[6:] for t in TILES):
+            if self.tls and path[6:] != "transmission":  # plain HTTP in an HTTPS page's frame: blocked
+                port = TILE[path[6:]][2]
+                host = link_host(self.headers.get("Host"), socket.gethostname())
+                self.send_response(302)
+                self.send_header("Location", port_url(host, port) + frame_at(self.path.partition("?")[2])[1:])
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
             body = render_open(self.status.get(), path[6:],
                                link_host(self.headers.get("Host"), socket.gethostname()),
                                https=self.headers.get("X-Forwarded-Proto") == "https",
@@ -3129,6 +3139,43 @@ class Server(ThreadingHTTPServer):
     daemon_threads = True
 
 
+class TLSHandler(Handler):
+    """The page over HTTPS on the LAN (a certificate of your own, [setup] lan_tls_cert). The
+    apps stay on plain HTTP, which a page over HTTPS can't show in a frame: /open/ sends the
+    browser on to the app itself."""
+    tls = True
+
+
+class TLSServer(Server):
+    """HTTPS: the certificate is read again when its file changes, so a renewal needs no restart."""
+
+    def __init__(self, address, handler, cert, key):
+        self.cert, self.key, self.loaded, self.context = cert, key, None, None
+        super().__init__(address, handler)
+
+    def current_context(self):
+        stamp = (os.stat(self.cert).st_mtime, os.stat(self.key).st_mtime)
+        if stamp != self.loaded:
+            context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            context.minimum_version = ssl.TLSVersion.TLSv1_2
+            context.load_cert_chain(self.cert, self.key)
+            self.context, self.loaded = context, stamp
+        return self.context
+
+    def get_request(self):
+        sock, addr = self.socket.accept()
+        try:  # the handshake happens in the request's own thread, so a slow client waits alone
+            return self.current_context().wrap_socket(sock, server_side=True,
+                                                      do_handshake_on_connect=False), addr
+        except OSError:
+            sock.close()
+            raise
+
+    def handle_error(self, request, client_address):
+        if not isinstance(sys.exc_info()[1], OSError):  # a failed handshake is just a client
+            super().handle_error(request, client_address)
+
+
 class DualStackServer(Server):
     """IPv6 and IPv4 on one socket."""
     address_family = socket.AF_INET6
@@ -3144,6 +3191,11 @@ def main(argv=None):
     parser.add_argument("-c", "--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--arr-dir", type=Path, default=DEFAULT_ARR_DIR)
     parser.add_argument("--once", action="store_true", help="print the status as JSON and exit")
+    parser.add_argument("--tls-cert", help="a certificate: the page is also served over HTTPS")
+    parser.add_argument("--tls-key")
+    parser.add_argument("--tls-bind", action="append", default=[], help="the address to serve it on (a "
+                        "LAN address: the tailnet's port 443 is Tailscale's)")
+    parser.add_argument("--tls-port", type=int, default=443)
     args = parser.parse_args(argv)
 
     # StateDirectory= in the unit (what was pushed about updates); run by hand: none
@@ -3159,6 +3211,16 @@ def main(argv=None):
         if e.errno != errno.EAFNOSUPPORT:  # e.g. the port is taken
             raise
         server = Server(("0.0.0.0", args.port), Handler)  # no IPv6 on this box
+    if args.tls_cert and args.tls_key:
+        for address in args.tls_bind:
+            try:
+                tls = TLSServer((address, args.tls_port), TLSHandler, args.tls_cert, args.tls_key)
+                tls.current_context()  # a bad certificate now, not at the first visit
+            except (OSError, ssl.SSLError) as e:
+                print(f"no HTTPS on {address}:{args.tls_port}: {e}", file=sys.stderr, flush=True)
+                continue
+            threading.Thread(target=tls.serve_forever, daemon=True).start()
+            print(f"serving HTTPS on {address}:{args.tls_port}", file=sys.stderr, flush=True)
     threading.Thread(target=Handler.status.watch, daemon=True).start()
     print(f"serving on port {args.port}", file=sys.stderr, flush=True)
     server.serve_forever()

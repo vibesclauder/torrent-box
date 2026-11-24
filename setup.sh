@@ -2222,6 +2222,28 @@ setup_xxx_library() {
     done <<<"$out"
 }
 
+# [setup] lan_tls_cert and lan_tls_key: a certificate for the box's LAN names (one of your own
+# authority, say) and the page is also served over HTTPS on the LAN address, port 443.
+lan_tls_args() {
+    local cert key
+    tls_args=""
+    cert=$(ini "$CONFIG" setup lan_tls_cert); key=$(ini "$CONFIG" setup lan_tls_key)
+    [[ -n $cert || -n $key ]] || return 0
+    cert=${cert/#\~/$HOME}; key=${key/#\~/$HOME}
+    if [[ -z $cert || -z $key ]]; then
+        warn "[setup] lan_tls_cert and lan_tls_key go together: the start page stays on plain HTTP"
+    elif [[ $cert == *" "* || $key == *" "* ]]; then
+        warn "lan_tls_cert / lan_tls_key: no spaces in the paths please; the start page stays on plain HTTP"
+    elif [[ ! -r $cert || ! -r $key ]]; then
+        warn "can't read $cert and $key: the start page stays on plain HTTP"
+    elif [[ -z ${lan_ip:-} ]]; then
+        warn "no LAN address found: the start page stays on plain HTTP"
+    else
+        tls_args="--tls-cert $cert --tls-key $key --tls-bind $lan_ip"
+        info "also over HTTPS on $lan_ip:443 (certificate $cert; the apps stay on plain HTTP)"
+    fi
+}
+
 setup_dashboard() {
     step "Start page (http://$(hostname)/)"
     local changed=0
@@ -2244,9 +2266,10 @@ setup_dashboard() {
     for icon in "$REPO"/icons/*.png; do
         update_file "$icon" "$DASHBOARD_ICONS/${icon##*/}" 644 root || true
     done
+    lan_tls_args
     helper render --strip-comments "$REPO/systemd/torrent-box-dashboard.service" "USER=$USER" \
         "UID=$(id -u)" "PORT=$DASHBOARD_PORT" "CONFIG=$CONFIG" "ARR_DIR=$ARR_DIR" \
-        >"$TMP/torrent-box-dashboard.service"
+        "TLS_ARGS=$tls_args" >"$TMP/torrent-box-dashboard.service"
     if update_file "$TMP/torrent-box-dashboard.service" "$DASHBOARD_UNIT" 644 root; then
         changed=1
         as_root systemctl daemon-reload
@@ -2413,6 +2436,8 @@ setup_firewall() {
     as_root ufw allow 51413/udp comment 'torrent-box: BitTorrent'
     as_root ufw allow from "$lan_net" to any port 9091 proto tcp comment 'torrent-box: Transmission web UI'
     as_root ufw allow from "$lan_net" to any port "$DASHBOARD_PORT" proto tcp comment 'torrent-box: start page'
+    [[ -z $(ini "$CONFIG" setup lan_tls_cert) ]] ||
+        as_root ufw allow from "$lan_net" to any port 443 proto tcp comment 'torrent-box: start page over HTTPS'
     [[ $own_ntfy != yes ]] ||
         as_root ufw allow from "$lan_net" to any port "$NTFY_PORT" proto tcp comment 'torrent-box: ntfy'
     case $media_server in

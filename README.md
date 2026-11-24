@@ -423,6 +423,17 @@ relay on ntfy.sh, which torrent-box doesn't set up.
 The start page has a **Notifications** row for it (no push when it's down: it would have to
 go through it). `own_ntfy = no` stops and disables the server; the package stays.
 
+### The start page over HTTPS on the LAN
+
+With a certificate for the box's names (`[setup] lan_tls_cert` and `lan_tls_key`, files you made
+yourself, say with your own small certificate authority that the PCs trust), the start page is
+also served over HTTPS on the box's LAN address, port 443: `https://<box>/` on a PC that
+trusts it. That makes it a secure context, so it can be installed and offer **Notify this
+device** (below) without Tailscale. The certificate is read again when its file changes. The
+apps stay on plain HTTP: a page over HTTPS can't show them in a frame, so there their tiles open
+them on their own (Transmission, which the page itself proxies, stays framed). Over the tailnet
+nothing changes: Tailscale's HTTPS has them all.
+
 ### Pushes to the phone it's installed on
 
 Next to ntfy, the start page pushes to the browsers it's installed in (Web Push), so an

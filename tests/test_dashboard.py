@@ -1,6 +1,7 @@
 import base64
 import http.client
 import json
+import os
 import re
 import struct
 import tempfile
@@ -633,6 +634,83 @@ class WebPushTest(unittest.TestCase):
                                 ("Added", "Some.Show.S01\nvia nCore", "")])
         self.assertEqual(call("/push/unsubscribe", {"endpoint": self.ENDPOINT}, ours)[0], 200)
         self.assertEqual(self.push.subs, [])
+
+
+class TLSTest(unittest.TestCase):
+    """The page over HTTPS on the LAN."""
+
+    @staticmethod
+    def make_cert(cert, key):
+        import datetime
+        from cryptography import x509
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives.asymmetric import ec
+        private = ec.generate_private_key(ec.SECP256R1())
+        name = x509.Name([x509.NameAttribute(x509.NameOID.COMMON_NAME, "borkai-server")])
+        t = datetime.datetime.now(datetime.timezone.utc)
+        built = (x509.CertificateBuilder().subject_name(name).issuer_name(name)
+                 .public_key(private.public_key()).serial_number(x509.random_serial_number())
+                 .not_valid_before(t - datetime.timedelta(days=1)).not_valid_after(t + datetime.timedelta(days=30))
+                 .sign(private, hashes.SHA256()))
+        Path(cert).write_bytes(built.public_bytes(serialization.Encoding.PEM))
+        Path(key).write_bytes(private.private_bytes(serialization.Encoding.PEM,
+                                                    serialization.PrivateFormat.PKCS8,
+                                                    serialization.NoEncryption()))
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.cert, self.key = str(Path(self.tmp.name) / "c.pem"), str(Path(self.tmp.name) / "k.pem")
+        self.make_cert(self.cert, self.key)
+        status = mock.MagicMock()
+        status.get.return_value = {"checks": {"seerr": {}, "transmission": {}}}
+        patcher = mock.patch.multiple(db.Handler, status=status, webpush=db.WebPush(self.tmp.name))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.httpd = db.TLSServer(("127.0.0.1", 0), db.TLSHandler, self.cert, self.key)
+        threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+        self.addCleanup(self.httpd.server_close)
+        self.addCleanup(self.httpd.shutdown)
+
+    def get(self, path, host="borkai-server"):
+        import ssl
+        context = ssl.create_default_context()
+        context.check_hostname, context.verify_mode = False, ssl.CERT_NONE
+        conn = http.client.HTTPSConnection(*self.httpd.server_address, context=context)
+        conn.request("GET", path, headers={"Host": host})
+        cert = conn.sock.getpeercert(binary_form=True)
+        r = conn.getresponse()
+        return r.status, dict(r.getheaders()), r.read(), cert
+
+    def test_the_page_is_served_over_https(self):
+        status, _, body, _ = self.get("/push.json")
+        self.assertEqual(status, 200)
+        self.assertIn(b'"supported"', body)
+
+    def test_apps_open_on_their_own_since_plain_http_can_not_be_framed_in_https(self):
+        status, headers, _, _ = self.get("/open/seerr?at=/settings")
+        self.assertEqual((status, headers["Location"]), (302, "http://borkai-server:5055/settings"))
+        # Transmission goes through this page itself, so it stays framed
+        with mock.patch.object(db, "render_open", return_value="framed"):
+            self.assertEqual(self.get("/open/transmission")[2], b"framed")
+
+    def test_a_renewed_certificate_is_used_without_a_restart(self):
+        before = self.get("/push.json")[3]
+        time.sleep(0.05)
+        self.make_cert(self.cert, self.key)
+        os.utime(self.cert, (time.time() + 5, time.time() + 5))
+        self.assertNotEqual(self.get("/push.json")[3], before)
+
+    def test_a_client_that_is_not_speaking_tls_does_no_harm(self):
+        import socket as sk
+        with sk.create_connection(self.httpd.server_address) as raw:
+            raw.sendall(b"GET / HTTP/1.1\r\n\r\n")
+            raw.settimeout(2)
+            try:
+                raw.recv(100)
+            except OSError:
+                pass
+        self.assertEqual(self.get("/push.json")[0], 200)
 
 
 class WatcherTest(unittest.TestCase):
