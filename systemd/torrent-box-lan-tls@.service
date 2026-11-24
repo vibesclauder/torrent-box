@@ -1,0 +1,27 @@
+# torrent-box: HTTPS on the LAN for the app on port %i, with your own certificate ([setup]
+# lan_tls_cert). socat terminates TLS on the LAN address at the app's port + 10000, the same
+# layout as the tailnet's HTTPS, and hands the bytes (websockets included) to the app on
+# localhost. Runs as you, who can read the key. setup.sh fills in the @...@ values.
+[Unit]
+Description=torrent-box HTTPS on the LAN for port %i
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=@USER@
+ExecStart=/bin/sh -c 'exec socat OPENSSL-LISTEN:$$((%i + 10000)),bind=@LAN_IP@,reuseaddr,fork,cert=@CERT@,key=@KEY@,verify=0,openssl-min-proto-version=TLS1.2 TCP:127.0.0.1:%i'
+Restart=on-failure
+RestartSec=10
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+RestrictAddressFamilies=AF_INET AF_INET6
+LockPersonality=yes
+MemoryMax=100M

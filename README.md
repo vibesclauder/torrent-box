@@ -423,16 +423,26 @@ relay on ntfy.sh, which torrent-box doesn't set up.
 The start page has a **Notifications** row for it (no push when it's down: it would have to
 go through it). `own_ntfy = no` stops and disables the server; the package stays.
 
-### The start page over HTTPS on the LAN
+### HTTPS on the LAN, with a certificate of your own
 
-With a certificate for the box's names (`[setup] lan_tls_cert` and `lan_tls_key`, files you made
-yourself, say with your own small certificate authority that the PCs trust), the start page is
-also served over HTTPS on the box's LAN address, port 443: `https://<box>/` on a PC that
-trusts it. That makes it a secure context, so it can be installed and offer **Notify this
-device** (below) without Tailscale. The certificate is read again when its file changes. The
-apps stay on plain HTTP: a page over HTTPS can't show them in a frame, so there their tiles open
-them on their own (Transmission, which the page itself proxies, stays framed). Over the tailnet
-nothing changes: Tailscale's HTTPS has them all.
+With a certificate for the box's names (`[setup] lan_tls_cert` and `lan_tls_key`: files you made
+yourself, say with your own small certificate authority that your PCs trust), the start page is
+also served over HTTPS on the box's LAN address, port 443 (`https://<box>/`), and every app on
+its port + 10000 (Seerr `https://<box>:15055/`), the layout of the tailnet's HTTPS. The page
+serves itself; each app gets a small TLS proxy (`socat`, one systemd unit per app,
+`torrent-box-lan-tls@<port>`) that hands the connection, websockets included, to the app on
+localhost. Opened that way, the start page links to and frames the apps over HTTPS, which is
+what a page over HTTPS needs (it can't frame plain HTTP). It is also a secure context, so it can
+be installed and offer **Notify this device** (below) without Tailscale.
+
+- Plain HTTP keeps working as it was, for the devices that don't trust the certificate.
+- Both are read again when the files change: the start page itself, the proxies through a
+  systemd path unit that restarts them. A renewal needs nothing from you.
+- The apps see these visitors as coming from the box (127.0.0.1), like with the tailnet's HTTPS:
+  Sonarr, Radarr, Prowlarr and Whisparr's "Disabled for Local Addresses" lets them in without a
+  login (setup says so).
+- ufw: the LAN gets 443 and each app's port + 10000.
+- Over the tailnet nothing changes: Tailscale's HTTPS has all of it already.
 
 ### Pushes to the phone it's installed on
 

@@ -1,0 +1,8 @@
+# torrent-box: restart the LAN HTTPS proxies (the renewed certificate). Started by
+# torrent-box-lan-tls.path.
+[Unit]
+Description=torrent-box LAN HTTPS proxies, new certificate
+
+[Service]
+Type=oneshot
+ExecStart=/bin/systemctl try-restart 'torrent-box-lan-tls@*.service'

@@ -663,7 +663,8 @@ class TLSTest(unittest.TestCase):
         self.cert, self.key = str(Path(self.tmp.name) / "c.pem"), str(Path(self.tmp.name) / "k.pem")
         self.make_cert(self.cert, self.key)
         status = mock.MagicMock()
-        status.get.return_value = {"checks": {"seerr": {}, "transmission": {}}}
+        status.get.return_value = {"time": 0, "hostname": "box", "storage_root": "/x", "others": [],
+                                   "checks": {"seerr": db.result(db.OK, "ok")}}
         patcher = mock.patch.multiple(db.Handler, status=status, webpush=db.WebPush(self.tmp.name))
         patcher.start()
         self.addCleanup(patcher.stop)
@@ -687,12 +688,20 @@ class TLSTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertIn(b'"supported"', body)
 
-    def test_apps_open_on_their_own_since_plain_http_can_not_be_framed_in_https(self):
-        status, headers, _, _ = self.get("/open/seerr?at=/settings")
-        self.assertEqual((status, headers["Location"]), (302, "http://borkai-server:5055/settings"))
-        # Transmission goes through this page itself, so it stays framed
-        with mock.patch.object(db, "render_open", return_value="framed"):
-            self.assertEqual(self.get("/open/transmission")[2], b"framed")
+    def test_apps_are_linked_and_framed_at_the_lan_names_https_ports(self):
+        checks = {"seerr": db.result(db.OK, "ok"), "transmission": db.result(db.OK, "ok"),
+                  "tailscale": {**db.result(db.OK, "ok"), "name": "box.tail1.ts.net",
+                                "links": {"5055": "seerr.tail1.ts.net"}}}
+        status = {"time": 0, "hostname": "box", "storage_root": "/x", "checks": checks, "others": []}
+        db.Handler.status.get.return_value = status
+        page = self.get("/")[2].decode()
+        self.assertNotIn("ts.net", page)                       # none of the tailnet's names
+        self.assertIn('href="/open/seerr"', page)               # under our bar
+        frame = self.get("/open/seerr?at=/settings")[2].decode()
+        self.assertIn('<iframe src="https://borkai-server:15055/settings"', frame)
+        self.assertIn('href="https://borkai-server:15055/"', frame)  # "open on its own"
+        # over the tailnet's own HTTPS (no TLS handler) nothing changed
+        self.assertTrue("seerr.tail1.ts.net" in db.render(status, "box.tail1.ts.net", https=True))
 
     def test_a_renewed_certificate_is_used_without_a_restart(self):
         before = self.get("/push.json")[3]

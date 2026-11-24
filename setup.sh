@@ -39,6 +39,7 @@ TS_HTTPS_OFFSET=10000  # [setup] tailscale_https: an app's HTTPS port on the tai
 ARR_DIR=$HOME/.local/share/torrent-box/arr  # compose.yml + the apps' config
 DASHBOARD_BIN=/usr/local/bin/torrent-box-dashboard
 DASHBOARD_UNIT=/etc/systemd/system/torrent-box-dashboard.service
+LAN_TLS_DIR=/etc/systemd/system  # torrent-box-lan-tls@.service, .path and -reload.service
 DASHBOARD_PORT=80  # the box's name alone opens the start page
 DASHBOARD_ICONS=/usr/local/share/torrent-box/icons  # dashboard.WEBAPP_ICON_DIRS
 INSTALLED=/usr/local/share/torrent-box/installed.json  # dashboard.INSTALLED_FILE
@@ -2226,7 +2227,7 @@ setup_xxx_library() {
 # authority, say) and the page is also served over HTTPS on the LAN address, port 443.
 lan_tls_args() {
     local cert key
-    tls_args=""
+    tls_args="" tls_cert="" tls_key=""
     cert=$(ini "$CONFIG" setup lan_tls_cert); key=$(ini "$CONFIG" setup lan_tls_key)
     [[ -n $cert || -n $key ]] || return 0
     cert=${cert/#\~/$HOME}; key=${key/#\~/$HOME}
@@ -2240,7 +2241,8 @@ lan_tls_args() {
         warn "no LAN address found: the start page stays on plain HTTP"
     else
         tls_args="--tls-cert $cert --tls-key $key --tls-bind $lan_ip"
-        info "also over HTTPS on $lan_ip:443 (certificate $cert; the apps stay on plain HTTP)"
+        tls_cert=$cert tls_key=$key
+        info "also over HTTPS on $lan_ip:443 (certificate $cert)"
     fi
 }
 
@@ -2284,6 +2286,58 @@ setup_dashboard() {
     fi
     systemctl is-enabled -q torrent-box-dashboard 2>/dev/null ||
         as_root systemctl enable torrent-box-dashboard
+}
+
+### 12c. HTTPS on the LAN
+
+# The apps over HTTPS on the LAN address, each on its port + TS_HTTPS_OFFSET, with the certificate
+# of [setup] lan_tls_cert: a TLS proxy (socat) per app, restarted when the certificate changes.
+# The start page serves itself (setup_dashboard), and its tiles frame these.
+setup_lan_https() {
+    step "HTTPS on the LAN"
+    lan_tls_args
+    local want=() p have unit changed=0
+    if [[ -n $tls_args ]]; then
+        mapfile -t want < <(web_ports | grep -vx "$DASHBOARD_PORT")
+    fi
+    have=$(systemctl list-units --all --plain --no-legend 'torrent-box-lan-tls@*' 2>/dev/null |
+           sed -n 's/.*@\([0-9]*\)\.service.*/\1/p' || true)
+    for p in $have; do  # not wanted any more
+        printf '%s\n' "${want[@]}" | grep -qx "$p" && continue
+        as_root systemctl disable --now "torrent-box-lan-tls@$p.service"
+        info "port $p: no longer over HTTPS on the LAN"
+    done
+    if [[ -z $tls_args ]]; then
+        info "not used (no [setup] lan_tls_cert and lan_tls_key in $CONFIG)"
+        if systemctl is-enabled -q torrent-box-lan-tls.path 2>/dev/null; then
+            as_root systemctl disable --now torrent-box-lan-tls.path
+        fi
+        return
+    fi
+    apt_install socat
+    local render=("USER=$USER" "LAN_IP=$lan_ip" "CERT=$tls_cert" "KEY=$tls_key")
+    helper render --strip-comments "$REPO/systemd/torrent-box-lan-tls@.service" "${render[@]}" \
+        >"$TMP/lan-tls@.service"
+    helper render --strip-comments "$REPO/systemd/torrent-box-lan-tls.path" "${render[@]}" \
+        >"$TMP/lan-tls.path"
+    if update_file "$TMP/lan-tls@.service" "$LAN_TLS_DIR/torrent-box-lan-tls@.service" 644 root; then
+        changed=1
+    fi
+    if update_file "$TMP/lan-tls.path" "$LAN_TLS_DIR/torrent-box-lan-tls.path" 644 root; then changed=1; fi
+    if update_file "$REPO/systemd/torrent-box-lan-tls-reload.service" \
+            "$LAN_TLS_DIR/torrent-box-lan-tls-reload.service" 644 root; then changed=1; fi
+    if (( changed )); then as_root systemctl daemon-reload; fi
+    for p in "${want[@]}"; do
+        unit="torrent-box-lan-tls@$p.service"
+        systemctl is-enabled -q "$unit" 2>/dev/null || as_root systemctl enable "$unit"
+        if ! systemctl is-active -q "$unit" 2>/dev/null; then
+            as_root systemctl start "$unit"
+        elif (( changed )); then
+            as_root systemctl restart "$unit"
+        fi
+    done
+    systemctl is-enabled -q torrent-box-lan-tls.path 2>/dev/null || as_root systemctl enable --now torrent-box-lan-tls.path
+    info "https://$lan_ip/ (start page); each app on its port + $TS_HTTPS_OFFSET, e.g. Seerr https://$(hostname):$(https_port 5055)/"
 }
 
 ### 12a. HTTPS on the tailnet
@@ -2436,8 +2490,12 @@ setup_firewall() {
     as_root ufw allow 51413/udp comment 'torrent-box: BitTorrent'
     as_root ufw allow from "$lan_net" to any port 9091 proto tcp comment 'torrent-box: Transmission web UI'
     as_root ufw allow from "$lan_net" to any port "$DASHBOARD_PORT" proto tcp comment 'torrent-box: start page'
-    [[ -z $(ini "$CONFIG" setup lan_tls_cert) ]] ||
+    if [[ -n $(ini "$CONFIG" setup lan_tls_cert) ]]; then  # the start page, and each app's HTTPS port
         as_root ufw allow from "$lan_net" to any port 443 proto tcp comment 'torrent-box: start page over HTTPS'
+        for p in $(web_ports | grep -vx "$DASHBOARD_PORT"); do
+            as_root ufw allow from "$lan_net" to any port "$(https_port "$p")" proto tcp comment "torrent-box: port $p over HTTPS"
+        done
+    fi
     [[ $own_ntfy != yes ]] ||
         as_root ufw allow from "$lan_net" to any port "$NTFY_PORT" proto tcp comment 'torrent-box: ntfy'
     case $media_server in
@@ -2662,6 +2720,7 @@ main() {
     setup_desireerr
     setup_xxx_library
     setup_tailscale_https
+    setup_lan_https
     setup_tailscale_services
     setup_firewall
     finish

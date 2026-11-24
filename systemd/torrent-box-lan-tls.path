@@ -1,0 +1,12 @@
+# torrent-box: when the LAN certificate or its key is renewed, the HTTPS proxies start again
+# (socat reads them once), through torrent-box-lan-tls-reload.service. setup.sh fills in @...@.
+[Unit]
+Description=torrent-box LAN certificate changed
+
+[Path]
+PathChanged=@CERT@
+PathChanged=@KEY@
+Unit=torrent-box-lan-tls-reload.service
+
+[Install]
+WantedBy=multi-user.target

@@ -2964,11 +2964,22 @@ class Handler(BaseHTTPRequestHandler):
     webpush = None  # set in main()
     tls = False  # TLSHandler: the page over HTTPS
 
+    def view(self):
+        """(the status, over HTTPS?) to render for this request. Over the LAN's HTTPS the apps
+        are at the LAN name's HTTPS ports: nothing of the tailnet's names and services."""
+        status = self.status.get()
+        if not self.tls:
+            return status, self.headers.get("X-Forwarded-Proto") == "https"
+        checks = {cid: c for cid, c in status["checks"].items() if cid != "tailscale"}
+        others = [dict(o, https=[]) for o in status.get("others") or []]
+        return dict(status, checks=checks, others=others), True
+
     def do_GET(self):
         path = self.path.split("?", 1)[0]
         if path == "/":
-            body = render(self.status.get(), link_host(self.headers.get("Host"), socket.gethostname()),
-                          https=self.headers.get("X-Forwarded-Proto") == "https").encode()
+            status, https = self.view()
+            body = render(status, link_host(self.headers.get("Host"), socket.gethostname()),
+                          https=https).encode()
             kind = "text/html; charset=utf-8"
         elif path == "/status.json":
             body = json.dumps(self.status.get(), indent=1).encode()
@@ -2981,18 +2992,10 @@ class Handler(BaseHTTPRequestHandler):
             kind = "text/html; charset=utf-8"
         elif path.startswith("/open/") and path[6:] in self.status.get()["checks"] \
                 and any(t[0] == path[6:] for t in TILES):
-            if self.tls and path[6:] != "transmission":  # plain HTTP in an HTTPS page's frame: blocked
-                port = TILE[path[6:]][2]
-                host = link_host(self.headers.get("Host"), socket.gethostname())
-                self.send_response(302)
-                self.send_header("Location", port_url(host, port) + frame_at(self.path.partition("?")[2])[1:])
-                self.send_header("Content-Length", "0")
-                self.end_headers()
-                return
-            body = render_open(self.status.get(), path[6:],
+            status, https = self.view()
+            body = render_open(status, path[6:],
                                link_host(self.headers.get("Host"), socket.gethostname()),
-                               https=self.headers.get("X-Forwarded-Proto") == "https",
-                               at=frame_at(self.path.partition("?")[2])).encode()
+                               https=https, at=frame_at(self.path.partition("?")[2])).encode()
             kind = "text/html; charset=utf-8"
         elif path == "/transmission" or path.startswith("/transmission/"):
             self.proxy_transmission()
@@ -3141,8 +3144,8 @@ class Server(ThreadingHTTPServer):
 
 class TLSHandler(Handler):
     """The page over HTTPS on the LAN (a certificate of your own, [setup] lan_tls_cert). The
-    apps stay on plain HTTP, which a page over HTTPS can't show in a frame: /open/ sends the
-    browser on to the app itself."""
+    apps are on their own HTTPS ports there (setup's TLS proxies), which it links to and
+    frames, like over the tailnet but by the LAN name."""
     tls = True
 
 
