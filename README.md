@@ -453,7 +453,12 @@ Open the start page **over HTTPS** (the Tailscale name; an iPhone or iPad needs 
 Home Screen first) and tap **Notify this device** in the footer; it sends a test. Needs
 `python3-cryptography` (setup installs it); without it the link doesn't show.
 
-- The subscriptions, the key and a token for the root jobs are in
+**Recent notifications** on the start page lists those pushes again, the last 10 of the past
+24 hours (newest on its folded line; opened, it stays open on that browser), whether or not a
+device is subscribed. Test pushes aren't listed, and neither are pushes that go only to ntfy
+(Seerr's, Desireerr's, or the root jobs' when the start page is down).
+
+- The subscriptions, the key, a token for the root jobs and the recent pushes are in
   `/var/lib/torrent-box-dashboard`. `push` hands the root jobs' pushes to the start page with
   that token, and it's best effort: ntfy stays the one that must arrive.
 - Like the rest of the page, anyone on the LAN or tailnet can subscribe a device. The box only

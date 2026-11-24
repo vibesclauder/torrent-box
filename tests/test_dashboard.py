@@ -577,6 +577,25 @@ class WebPushTest(unittest.TestCase):
             self.assertTrue(db.send_push(s, "T", "M", 3, []))
         self.assertEqual(sent, [("T", "M")])
 
+    def test_recent_pushes_are_kept_ten_for_a_day(self):
+        self.push.send("torrent-box", "This is a test.", "test")  # not listed
+        for i in range(12):
+            self.push.remember(f"Added {i}", "x", now=1000 + i)
+        self.assertEqual([x["title"] for x in self.push.recently(now=1100)],
+                         [f"Added {i}" for i in range(11, 1, -1)])
+        self.assertEqual(len(db.WebPush(self.tmp.name).recently(now=1100)), 10)  # survive a restart
+        self.assertEqual([x["title"] for x in self.push.recently(now=1005 + db.RECENT_FOR)],
+                         [f"Added {i}" for i in range(11, 5, -1)])
+        self.push.send("Jellyfin is down", "not running")  # no device subscribed: still listed
+        self.assertEqual(self.push.recently()[0]["title"], "Jellyfin is down")
+
+    def test_recent_pushes_on_the_page(self):
+        self.assertEqual(db.recent_html([]), "")
+        page = db.recent_html([{"time": 1000, "title": "Added <b>", "message": "a\nvia nCore"}])
+        self.assertIn("Added &lt;b&gt;", page)
+        self.assertIn("<p>a\nvia nCore</p>", page)
+        self.assertIn('data-fold="recent"', page)
+
     def test_test_push_is_rate_limited(self):
         with self.assertRaises(ValueError):
             self.push.test(now=100)  # no one subscribed

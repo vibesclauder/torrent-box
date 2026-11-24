@@ -1401,6 +1401,9 @@ PUSH_HOSTS = (".googleapis.com", ".push.services.mozilla.com", ".push.apple.com"
 PUSH_DEVICES = 20          # subscribed browsers at most
 PUSH_TEST_EVERY = 10       # seconds between two test pushes
 PUSH_HEADER = "X-Requested-With"  # a form on another site can't send it without our say-so
+RECENT_MAX = 10            # pushes the start page lists again
+RECENT_FOR = 24 * 3600     # for this long (seconds)
+RECENT_SKIP = ("test", "prowlarr-test")  # tags of pushes that aren't worth listing
 
 
 def b64url(raw):
@@ -1429,7 +1432,8 @@ def push_crypto():
 class WebPush:
     """Push notifications to the browsers where the start page is installed (RFC 8030 push,
     RFC 8291 encryption, RFC 8292 VAPID), next to the ntfy ones. The VAPID key, the
-    subscriptions and a token for the root jobs live in state_dir (none: kept until restart)."""
+    subscriptions, a token for the root jobs and the recent pushes (the page lists them again)
+    live in state_dir (none: kept until restart)."""
 
     def __init__(self, state_dir=None):
         self.c = push_crypto()
@@ -1439,9 +1443,14 @@ class WebPush:
         self.key = None
         self.token = secrets.token_urlsafe(24)
         self.tested = 0.0
+        self.recent = []        # {"time", "title", "message"}, oldest first
         if self.dir:
             try:
                 self.subs = json.loads((self.dir / "push.json").read_text())
+            except (OSError, ValueError):
+                pass
+            try:
+                self.recent = json.loads((self.dir / "recent.json").read_text())
             except (OSError, ValueError):
                 pass
             try:
@@ -1572,9 +1581,24 @@ class WebPush:
         print(f"web push failed: {reason}", file=sys.stderr, flush=True)
         return reason
 
+    def remember(self, title, message, now=None):
+        """Keep a push for the page's list of recent ones (RECENT_MAX, for RECENT_FOR)."""
+        now = time.time() if now is None else now
+        with self.lock:
+            self.recent = [x for x in self.recent if now - x["time"] < RECENT_FOR][-(RECENT_MAX - 1):]
+            self.recent.append({"time": now, "title": title[:120], "message": message[:600]})
+            self.write("recent.json", json.dumps(self.recent))
+
+    def recently(self, now=None):
+        """The pushes of the last RECENT_FOR, newest first."""
+        now = time.time() if now is None else now
+        return [x for x in reversed(self.recent) if now - x["time"] < RECENT_FOR][:RECENT_MAX]
+
     def send(self, title, message, tag="", wait=False):
         """Push to every subscribed browser; in the background unless wait. How many were
-        reached (with wait)."""
+        reached (with wait). The page lists it again, whether or not a browser is subscribed."""
+        if tag not in RECENT_SKIP:
+            self.remember(title, message)
         if not self.supported or not self.subs:
             return 0
         data = json.dumps({"title": title[:120], "body": message[:600], "tag": tag or None,
@@ -2001,6 +2025,17 @@ color:var(--muted);margin:0;white-space:nowrap}
 .folded .apps{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:2px 10px;
 padding:6px 10px 10px;border-top:1px solid var(--line)}
 .others{background:var(--card);border:1px solid var(--line);border-radius:14px;box-shadow:var(--shadow)}
+.recent{background:var(--card);border:1px solid var(--line);border-radius:14px;box-shadow:var(--shadow)}
+.recent>summary{display:flex;align-items:baseline;gap:10px;padding:12px 16px;cursor:pointer;list-style:none}
+.recent>summary::-webkit-details-marker{display:none}
+.recent>summary b{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.recent>summary .muted{margin-left:auto;white-space:nowrap}
+.recent[open]>summary .chev{transform:rotate(90deg)}
+.recent ul{list-style:none;margin:0;padding:0;display:grid;grid-template-columns:auto minmax(0,1fr)}
+.recent li{grid-column:1/-1;display:grid;grid-template-columns:subgrid;column-gap:12px;padding:10px 16px;
+border-top:1px solid var(--line)}
+.recent li time{color:var(--muted);font-size:13px;font-variant-numeric:tabular-nums;padding-top:1px}
+.recent li p{margin:2px 0 0;color:var(--muted);font-size:13px;white-space:pre-line;overflow-wrap:anywhere}
 .others .apps{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:2px 10px;padding:6px 10px}
 .badge.other{background:linear-gradient(135deg,#64748b,#334155)}
 .app{display:flex;gap:10px;align-items:center;padding:8px;border-radius:10px;color:inherit;text-decoration:none}
@@ -2179,8 +2214,10 @@ document.addEventListener("toggle",ev=>{
 },true);
 function localTimes(){  // the box's times in the viewer's time zone
   for(const t of document.querySelectorAll("time[datetime]")){
+    const d=new Date(t.dateTime),short=t.classList.contains("short");
     t.title=t.textContent;
-    t.textContent=new Date(t.dateTime).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit",second:"2-digit"});
+    t.textContent=d.toLocaleTimeString([],short?{hour:"2-digit",minute:"2-digit"}:{hour:"2-digit",minute:"2-digit",second:"2-digit"});
+    if(short&&d.toDateString()!==new Date().toDateString())t.textContent="yesterday "+t.textContent;
   }
 }
 localTimes();
@@ -2660,7 +2697,25 @@ addEventListener("message",ev=>{
 """
 
 
-def render(status, host, https=False):
+def recent_html(recent):
+    """The recent pushes, folded: one line with the newest until opened."""
+    if not recent:
+        return ""
+    e = html.escape
+    items = []
+    for x in recent:
+        message = f'<p>{e(x["message"])}</p>' if x["message"] else ""
+        items.append(f'<li><time class="short" datetime="{time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(x["time"]))}">'
+                     f'{time.strftime("%H:%M", time.localtime(x["time"]))}</time>'
+                     f'<div><b>{e(x["title"])}</b>{message}</div></li>')
+    n = len(recent)
+    return (f'<h2>Recent notifications</h2><details class="recent" data-fold="recent"><summary>'
+            f'<span class="chev">›</span><b>{e(recent[0]["title"])}</b>'
+            f'<span class="muted">{n} in the last {RECENT_FOR // 3600} hours</span></summary>'
+            f'<ul>{"".join(items)}</ul></details>')
+
+
+def render(status, host, https=False, recent=()):
     e = html.escape
     checks = status["checks"]
     worst = max((c["state"] for c in checks.values()), key=WORST.get, default=OK)
@@ -2764,6 +2819,7 @@ def render(status, host, https=False):
 <div class="groups{" many" if main_count > 4 else ""}" style="--cols:{max(main_count, 3)}">{"".join(groups)}</div>
 {folded}
 {others_html(status, host, https)}
+{recent_html(recent)}
 <h2>Health</h2>
 <div class="rows">{"".join(rows)}</div>
 <footer><span><span id="updated">Updated {updated}, refreshes every {REFRESH_SECONDS} s.</span> <a href="#" id="push-link" hidden></a></span>
@@ -2979,7 +3035,7 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/":
             status, https = self.view()
             body = render(status, link_host(self.headers.get("Host"), socket.gethostname()),
-                          https=https).encode()
+                          https=https, recent=self.webpush.recently() if self.webpush else ()).encode()
             kind = "text/html; charset=utf-8"
         elif path == "/status.json":
             body = json.dumps(self.status.get(), indent=1).encode()
