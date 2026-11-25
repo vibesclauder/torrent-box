@@ -2031,12 +2031,13 @@ padding:6px 10px 10px;border-top:1px solid var(--line)}
 .recent>summary .latest{margin-left:auto;white-space:nowrap}
 .recent[open]>summary .chev{transform:rotate(90deg)}
 .recent ul{list-style:none;margin:0;padding:0}
-.recent li{display:grid;grid-template-columns:10px minmax(0,1fr) auto;align-items:center;gap:2px 12px;
+.recent li{display:grid;grid-template-columns:10px minmax(0,1fr) auto;align-items:baseline;gap:2px 12px;
 padding:10px 16px;border-top:1px solid var(--line)}
 .recent li .dot{width:8px;height:8px;box-shadow:none}
 .recent li .dot:not(.ok):not(.warn):not(.down){background:var(--accent)}
+.recent li b{overflow-wrap:anywhere}
 .recent li time{color:var(--muted);font-size:12px;font-variant-numeric:tabular-nums;white-space:nowrap}
-.recent li p{grid-column:2/-1;margin:0;color:var(--muted);font-size:13px;white-space:pre-line;overflow-wrap:break-word}
+.recent li p{grid-column:2/-1;margin:0;color:var(--muted);font-size:13px;white-space:pre-line;overflow-wrap:anywhere}
 .others .apps{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:2px 10px;padding:6px 10px}
 .badge.other{background:linear-gradient(135deg,#64748b,#334155)}
 .app{display:flex;gap:10px;align-items:center;padding:8px;border-radius:10px;color:inherit;text-decoration:none}
@@ -2718,6 +2719,11 @@ def ago(seconds):
     return f"{int(seconds // 3600)} h ago"
 
 
+def breakable(text):
+    """Escaped, with places to wrap after the dots and underscores of release names."""
+    return html.escape(text).replace(".", ".<wbr>").replace("_", "_<wbr>")
+
+
 def recent_html(recent, now=None):
     """The recent pushes, folded: how many and how fresh until opened, then one row each."""
     if not recent:
@@ -2726,11 +2732,9 @@ def recent_html(recent, now=None):
     now = time.time() if now is None else now
     items = []
     for x in recent:
-        # release names break at their dots, not in the middle of a word
-        text = e(x["message"]).replace(".", ".<wbr>").replace("_", "_<wbr>")
-        message = f"<p>{text}</p>" if x["message"] else ""
+        message = f"<p>{breakable(x['message'])}</p>" if x["message"] else ""
         stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(x["time"]))
-        items.append(f'<li><i class="dot {recent_kind(x["title"])}"></i><b>{e(x["title"])}</b>'
+        items.append(f'<li><i class="dot {recent_kind(x["title"])}"></i><b>{breakable(x["title"])}</b>'
                      f'<time class="short" datetime="{stamp}">{time.strftime("%H:%M", time.localtime(x["time"]))}</time>'
                      f'{message}</li>')
     n = len(recent)

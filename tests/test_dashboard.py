@@ -598,6 +598,8 @@ class WebPushTest(unittest.TestCase):
         self.assertIn("<b>1 notification</b>", page)
         self.assertIn("latest 5 min ago", page)
         self.assertIn('data-fold="recent"', page)
+        long = db.recent_html([{"time": 1000, "title": "Grabbed A.Long_Release", "message": ""}])
+        self.assertIn("<b>Grabbed A.<wbr>Long_<wbr>Release</b>", long)  # titles wrap too
         self.assertEqual([db.recent_kind(t) for t in ("Jellyfin is down", "Sonarr needs a look",
                                                       "Jellyfin is fine again", "Added")],
                          [db.DOWN, db.WARN, db.OK, ""])
