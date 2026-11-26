@@ -25,7 +25,8 @@ REPO = Path(__file__).resolve().parents[1]
 UTC = timezone.utc
 T0 = datetime(2026, 11, 26, 20, 0, 0, tzinfo=UTC)
 ON_MAINS = {"ups.status": "OL", "battery.charge": "100", "battery.runtime": "2460",
-            "ups.load": "12", "device.mfr": "EATON", "device.model": "Ellipse PRO 850"}
+            "ups.load": "12", "ups.realpower": "61", "ups.realpower.nominal": "500",
+            "device.mfr": "EATON", "device.model": "Ellipse PRO 850 "}  # sic: a space at the end
 ON_BATTERY = {**ON_MAINS, "ups.status": "OB DISCHRG", "battery.charge": "87",
               "battery.runtime": "1380"}
 # The start of an Eaton Ellipse PRO's HID report descriptor, and a keyboard's
@@ -70,7 +71,7 @@ class UpsEventTest(unittest.TestCase):
         push = self.server.pushes[-1]
         self.assertIn("Power cut", push["title"])
         self.assertEqual(push["priority"], 4)
-        self.assertIn("battery 87%, about 23 min left, load 12%", push["message"])
+        self.assertIn("battery 87%, about 23 min left, load 12% (61 W)", push["message"])
         self.assertIn("2 torrents paused", push["message"])
         self.assertEqual(self.calls("torrent-stop"), [{"ids": ["aa", "bb"]}])  # cc was stopped already
         self.assertEqual(json.loads(self.paused.read_text()), ["aa", "bb"])
@@ -420,8 +421,18 @@ class DashboardTest(unittest.TestCase):
 
     def test_states(self):
         c = self.check(ON_MAINS)
-        self.assertEqual((c["state"], c["summary"]), (db.OK, "On mains, battery 100%, 41 min left, load 12%"))
+        self.assertEqual((c["state"], c["summary"]),
+                         (db.OK, "On mains, battery 100%, 41 min left, load 12% (61 W)"))
         self.assertEqual(c["metrics"]["model"], "EATON Ellipse PRO 850")
+        self.assertIn("12% (about 60 W)", self.check({**ON_MAINS, "ups.realpower": ""})["summary"])
+        self.assertTrue(self.check({k: v for k, v in ON_MAINS.items() if not k.startswith("ups.realpower")})
+                        ["summary"].endswith("load 12%"))  # it doesn't tell
+        self.assertIn("61 W · EATON Ellipse PRO 850", db.ups_html(self.check(ON_MAINS), time.time()))
+        self.assertEqual(r2t.ups_summary({"ups.realpower": "32"}), "drawing 32 W")
+        # an Eaton saying 0 W under load: its VA instead
+        self.assertIn("load 8% (139 VA)", self.check({**ON_MAINS, "ups.load": "8", "ups.realpower": "0",
+                                                      "ups.power": "139"})["summary"])
+        self.assertEqual(r2t.ups_watts({"ups.load": "0", "ups.realpower": "0"}), "0 W")
         c = self.check(ON_BATTERY)
         self.assertEqual(c["state"], db.WARN)
         self.assertTrue(c["summary"].startswith("On battery, battery 87%"))

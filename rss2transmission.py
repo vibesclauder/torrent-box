@@ -977,7 +977,7 @@ def upsc(ups=UPS, timeout=5):
 
 
 def ups_summary(v):
-    """ "battery 87%, about 23 min left, load 14%" from upsc's variables."""
+    """ "battery 87%, about 23 min left, load 14% (32 W)" from upsc's variables."""
     parts = []
     if v.get("battery.charge"):
         parts.append(f"battery {v['battery.charge']}%")
@@ -985,9 +985,32 @@ def ups_summary(v):
         parts.append(f"about {duration(float(v['battery.runtime']))} left")
     except (KeyError, ValueError):
         pass
+    watts = ups_watts(v)
     if v.get("ups.load"):
-        parts.append(f"load {v['ups.load']}%")
+        parts.append(f"load {v['ups.load']}%" + (f" ({watts})" if watts else ""))
+    elif watts:
+        parts.append(f"drawing {watts}")
     return ", ".join(parts)
+
+
+def ups_watts(v):
+    """What the load draws: "32 W"; "139 VA" when the UPS's watts can't be trusted (some
+    Eatons say 0 W at times while the load is well above 0, and VA is all that's left: a bit
+    more than the watts); "about 30 W" from its percent of what it's rated for; "" if the
+    UPS doesn't tell."""
+    def num(key):
+        try:
+            return float(v[key])
+        except (KeyError, ValueError):
+            return None
+    watts, load, va = num("ups.realpower"), num("ups.load"), num("ups.power")
+    if watts is not None and (watts > 0 or not load):
+        return f"{watts:.0f} W"
+    if va:
+        return f"{va:.0f} VA"
+    if load is not None and num("ups.realpower.nominal"):
+        return f"about {load * num('ups.realpower.nominal') / 100:.0f} W"
+    return ""
 
 
 def duration(seconds):

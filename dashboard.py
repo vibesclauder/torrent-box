@@ -1258,6 +1258,26 @@ def datetime_seconds(text):
     return datetime.fromisoformat(text).timestamp()
 
 
+def ups_watts(v):
+    """What the load draws: "32 W"; "139 VA" when the UPS's watts can't be trusted (some
+    Eatons say 0 W at times while the load is well above 0, and VA is all that's left: a bit
+    more than the watts); "about 30 W" from its percent of what it's rated for; "" if the
+    UPS doesn't tell."""
+    def num(key):
+        try:
+            return float(v[key])
+        except (KeyError, ValueError):
+            return None
+    watts, load, va = num("ups.realpower"), num("ups.load"), num("ups.power")
+    if watts is not None and (watts > 0 or not load):
+        return f"{watts:.0f} W"
+    if va:
+        return f"{va:.0f} VA"
+    if load is not None and num("ups.realpower.nominal"):
+        return f"about {load * num('ups.realpower.nominal') / 100:.0f} W"
+    return ""
+
+
 def check_ups(s, now=None, info_file=None, ups_vars=upsc):
     now = now or time.time()
     try:
@@ -1286,10 +1306,13 @@ def check_ups(s, now=None, info_file=None, ups_vars=upsc):
         parts.append(f"battery {metrics['charge']:.0f}%")
     if "runtime" in metrics:
         parts.append(f"{short_duration(metrics['runtime'])} left")
+    metrics["watts"] = ups_watts(v)
     if "load" in metrics:
-        parts.append(f"load {metrics['load']:.0f}%")
-    metrics["model"] = " ".join(filter(None, (v.get("device.mfr") or v.get("ups.mfr"),
-                                              v.get("device.model") or v.get("ups.model"))))
+        parts.append(f"load {metrics['load']:.0f}%" + (f" ({metrics['watts']})" if metrics["watts"] else ""))
+    elif metrics["watts"]:
+        parts.append(f"drawing {metrics['watts']}")
+    metrics["model"] = " ".join(filter(None, ((v.get("device.mfr") or v.get("ups.mfr") or "").strip(),
+                                              (v.get("device.model") or v.get("ups.model") or "").strip())))
     state, details = OK, []
     if "LB" in flags or "FSD" in flags:
         state = DOWN
@@ -2508,7 +2531,8 @@ def ups_html(c, now):
     if "runtime" in m:
         meters.append(meter("Runtime", short_duration(m["runtime"]), "at this load"))
     if "load" in m:
-        meters.append(meter("Load", f"{m['load']:.0f}%", m.get("model") or "",
+        meters.append(meter("Load", f"{m['load']:.0f}%",
+                            " · ".join(filter(None, (m.get("watts"), m.get("model")))),
                             bar_html([m["load"]], m["load"] >= 80)))
     outages = m.get("outages", [])
     if outages:
