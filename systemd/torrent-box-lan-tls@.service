@@ -25,3 +25,6 @@ RestrictNamespaces=yes
 RestrictAddressFamilies=AF_INET AF_INET6
 LockPersonality=yes
 MemoryMax=100M
+
+[Install]
+WantedBy=multi-user.target
