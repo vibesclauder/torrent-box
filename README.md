@@ -585,7 +585,10 @@ it when it changes). It browses StashDB with your API key (stashdb.org, your pro
 setup takes it from Whisparr's StashDB import list if there is one, otherwise asks once (or
 `STASHDB_KEY`), and keeps it in `secrets.ini` as `stashdb_key`. Skipped, Desireerr asks for
 it itself. With Jellyfin, setup makes it a Jellyfin API key named Desireerr (Dashboard, API
-Keys), for the Watch button on downloaded scenes. Its pushes go to this box's ntfy server and
+Keys), for the Watch button on downloaded scenes. That button opens Jellyfin by the LAN name
+(`https://<box>:18096` with [HTTPS on the LAN](#https-on-the-lan-with-a-certificate-of-your-own), else `http://<box>:8096`) in a
+new tab, and where the start page shows Desireerr under its bar, Jellyfin under that bar
+instead (`/open/jellyfin`). Its pushes go to this box's ntfy server and
 topic, and it reads Whisparr's API key from Whisparr's config folder (mounted read-only in
 its container). Both get a tile on the start page. Set to `no` (and a setup run) removes
 Whisparr's and Desireerr's containers and Whisparr's Prowlarr application; their settings

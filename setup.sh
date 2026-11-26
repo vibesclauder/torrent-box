@@ -2164,14 +2164,17 @@ setup_desireerr() {
     (( DRY_RUN )) || info "runs $(helper desireerr status)"
     # Its admin is the login all the apps share, its StashDB key the one in secrets.ini, with
     # Jellyfin an API key named Desireerr for its Watch button, and its pushes go to our ntfy
-    # server and topic (all through the environment, never the command line). It follows a
-    # changed login or topic; an admin made on its first visit, or a key or topic changed in
-    # its Settings, stay as they are.
+    # server and topic (all through the environment, never the command line). The Watch button
+    # goes to Jellyfin by the LAN name (over HTTPS with [setup] lan_tls_cert), and framed under
+    # our bar (/open/jellyfin) where the start page frames Desireerr. It follows a changed
+    # login, topic or address; an admin made on its first visit, or a key, topic or address
+    # changed in its Settings, stay as they are.
     if (( DRY_RUN )); then
-        info "would set its admin ('${rpc_user:-?}', the shared login), StashDB key, Jellyfin key and ntfy topic, where not done yet"
+        info "would set its admin ('${rpc_user:-?}', the shared login), StashDB key, Jellyfin key, Watch button and ntfy topic, where not done yet"
     elif [[ -n ${rpc_user:-} || -n $stashdb_key || -n ${ntfy_topic:-} ]]; then
-        local out jf_key="" var vars=(DESIREERR_ADMIN_USER DESIREERR_ADMIN_PASSWORD DESIREERR_STASHDB_KEY
-                                       DESIREERR_JELLYFIN_KEY DESIREERR_NTFY_SERVER DESIREERR_NTFY_TOPIC)
+        local out jf_key="" jf_link="" jf_framed="" var vars=(DESIREERR_ADMIN_USER DESIREERR_ADMIN_PASSWORD
+            DESIREERR_STASHDB_KEY DESIREERR_JELLYFIN_KEY DESIREERR_JELLYFIN_LINK DESIREERR_JELLYFIN_LINK_FRAMED
+            DESIREERR_NTFY_SERVER DESIREERR_NTFY_TOPIC)
         local pass=()
         for var in "${vars[@]}"; do pass+=(-e "$var"); done
         if [[ $media_server == jellyfin ]] &&
@@ -2180,10 +2183,20 @@ setup_desireerr() {
             jf_key=""
             warn "no Jellyfin API key for its Watch button (above); add one in its Settings"
         fi
+        if [[ $media_server == jellyfin ]]; then  # tls_args: setup_dashboard's lan_tls_args
+            if [[ -n ${tls_args:-} ]]; then  # the start page on 443 there
+                jf_link="https://$(hostname):$(https_port 8096)"
+                jf_framed="https://$(hostname)/open/jellyfin?at={path}"
+            else
+                jf_link="http://$(hostname):8096"
+                jf_framed="http://$(hostname)$( (( DASHBOARD_PORT == 80 )) || echo ":$DASHBOARD_PORT")/open/jellyfin?at={path}"
+            fi
+        fi
         # "init" in a container of its own, with the same data; the names (-e NAME) go on the
         # command line, their values through sudo's environment
         if out=$(DESIREERR_ADMIN_USER=${rpc_user:-} DESIREERR_ADMIN_PASSWORD=${rpc_password:-} \
                 DESIREERR_STASHDB_KEY=$stashdb_key DESIREERR_JELLYFIN_KEY=$jf_key \
+                DESIREERR_JELLYFIN_LINK=$jf_link DESIREERR_JELLYFIN_LINK_FRAMED=$jf_framed \
                 DESIREERR_NTFY_SERVER=${ntfy_server:-} DESIREERR_NTFY_TOPIC=${ntfy_topic:-} \
                 sudo --preserve-env="$(IFS=,; echo "${vars[*]}")" \
                 docker compose -f "$ARR_DIR/compose.yml" run --rm --no-deps -T "${pass[@]}" desireerr init); then
