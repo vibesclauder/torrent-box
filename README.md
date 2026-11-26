@@ -111,7 +111,7 @@ page names, else its favicon.ico), apart from torrent-box's own. An app on
 several ports is one entry; one only on 127.0.0.1 is listed when `tailscale serve` gives it an
 HTTPS address. Over HTTPS the link is its tailnet address, else its port on the LAN. Below
 the apps: the storage disk (free space), the nCore feed (rss2transmission's last run), the
-Samba share, Tailscale and the box itself: uptime and CPU temperature, and meters for CPU
+Samba share, Tailscale, the [UPS](#ups) and the box itself: uptime and CPU temperature, and meters for CPU
 use (with the load), memory (apps, and the cache the kernel gives back when they need it)
 and the OS disk; CPU and memory with a line of their last hour (the meters
 open from the row's line, and stay open on that browser once opened). Anything
@@ -121,7 +121,8 @@ that needs a look is listed at the top, and the tab's icon turns orange or red. 
 It also **pushes** what stays wrong for 10 minutes (an app down, the feed failing, Tailscale
 logged out, the system disk full...), once, and again when it's fine. Not what already
 pushes on its own: the storage disk (rss2transmission), Prowlarr's health and nCore (Prowlarr),
-the disk's health (smartd); for those only when the app itself is down.
+the disk's health (smartd); for those only when the app itself is down. The UPS row never
+pushes: NUT's events do.
 
 It also tells you about **updates**: every 6 hours it asks GitHub whether `main` has moved on
 since the commit setup.sh installed from. If so, a banner at the top shows the new version,
@@ -221,6 +222,57 @@ topic). The start page shows the disk by name (its family from smartmontools' dr
 database and its size, e.g. "Seagate IronWolf 12 TB", or the bare model number if the
 database doesn't know it), its temperature, whether it has bad sectors, and how busy it
 is: its reads and writes now, and a line of each for the last hour.
+
+## UPS
+
+With a UPS on USB, setup installs **NUT** (Network UPS Tools) and has it watch the UPS. When
+the battery runs low, NUT shuts the box down cleanly and then tells the UPS to cut its power.
+The UPS turns its outlets back on when the mains comes back, and the box starts again if its
+BIOS is set to power on after a power loss ("Restore on AC power loss: Power On"). That is
+NUT's own job: its driver, `upsd` and `upsmon` run on their own (standalone), and none of it
+depends on torrent-box's programs.
+
+`[setup] ups` in config.ini: `auto` (the default) sets it up when a UPS is on USB, so boxes
+without one get nothing; `yes` or `no`. setup.sh finds a UPS by what it says it is on USB (a
+HID power device, which is what NUT's `usbhid-ups` driver talks to: Eaton, APC, CyberPower
+and most others), not from a list of models. NUT is already set up on the box by hand? Then
+setup leaves it alone.
+
+The box **shuts down at 40% battery or 5 minutes of runtime left**, whichever comes first
+(`[setup] ups_low_battery` changes the percent). NUT works that out itself instead of taking
+the UPS's own "low battery" signal, which often comes only at 20%. 40% leaves room for an
+ageing battery, whose runtime estimate gets too optimistic, and spares it deep discharges. A
+shutdown takes well under a minute.
+
+**Pushes** (ntfy and the browsers the start page is installed in, like everything else): a
+power cut (high priority), the battery low and the shutdown (urgent), the power back (with how
+long it was out), the box losing touch with the UPS and finding it again, and the battery
+needing replacement. A short flicker sends two pushes: one when the cut starts and one when
+the power comes back. While on battery, **Transmission is paused** (only the torrents that
+were running), and they start again when the power is back. New torrents added in the
+meantime wait too. `[transmission] pause_on_battery = no` keeps them running.
+
+The **grid log**, `~/.local/state/rss2transmission/grid.log`, keeps a line for each time the
+power went out and each time it came back (with how long it was out), for good: it isn't part
+of the 3-day journal, and it's a few lines a month. If the box shut down during a cut, "back"
+is the time it booted again. The start page's UPS row shows the status, battery, runtime and
+load, and opens to the power cuts of the last 30 days.
+
+How it fits together: setup writes `/etc/nut/nut.conf`, `ups.conf`, `upsd.conf`,
+`upsd.users` and `upsmon.conf`. The last two are readable by root and the nut group only:
+they hold upsmon's password, which setup generates on the box. upsd only listens on
+127.0.0.1. upsmon's notify hook, `/usr/local/lib/torrent-box/ups-notify`, runs
+`rss2transmission --ups-event <event>` as you, which sends the push, writes the grid log and
+pauses Transmission. A sudoers rule, `/etc/sudoers.d/torrent-box-ups`, lets the nut user run
+exactly those commands and nothing else. Setting `ups = no` and running setup again stops NUT
+and puts the package's original files back (kept as `*.before-torrent-box`). The grid log
+stays.
+
+```sh
+upsc ups                                   # everything the UPS reports
+upsc ups ups.status                        # OL: on mains, OB: on battery, LB: battery low
+journalctl -u nut-driver@ups -u nut-server -u nut-monitor
+```
 
 ## Samba share
 

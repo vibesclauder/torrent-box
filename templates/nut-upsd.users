@@ -1,0 +1,5 @@
+# torrent-box (setup.sh, [setup] ups): the one login upsd knows, upsmon's.
+# Installed to /etc/nut/upsd.users (root and the nut group only); setup.sh makes the password.
+[upsmon]
+	password = @PASSWORD@
+	upsmon primary

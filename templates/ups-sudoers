@@ -1,0 +1,4 @@
+# torrent-box (setup.sh, [setup] ups): upsmon's notify hook (ups-notify, run as nut) may run
+# rss2transmission as @USER@ for the UPS's events, and nothing else. /etc/sudoers.d/torrent-box-ups
+Cmnd_Alias TORRENT_BOX_UPS = @COMMANDS@
+nut ALL=(@USER@) NOPASSWD: TORRENT_BOX_UPS

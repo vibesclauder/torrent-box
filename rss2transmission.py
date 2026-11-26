@@ -13,6 +13,8 @@ One run, normally started every few minutes by a systemd timer:
   6. check free space on the storage disk
   7. push a summary (added / downloaded / removed / problems) to the browsers the start page
      is installed in, and to ntfy if there's a topic
+With a UPS ([setup] ups in config.ini), upsmon's notify hook also runs it with --ups-event: a
+push about the power, a line in the grid log, and Transmission paused while on battery.
 A torrent is only marked seen once Transmission accepted it, and a finished download only
 counts as announced once ntfy accepted the push, so failures retry next run.
 The very first run only records what is already in the feed and already finished in
@@ -34,7 +36,9 @@ import re
 import shutil
 import socket
 import sqlite3
+import subprocess
 import sys
+import time
 import urllib.error
 import urllib.request
 import xml.etree.ElementTree as ET
@@ -63,6 +67,16 @@ ARR_DOWNLOADS = "downloads"
 VIDEO_EXTENSIONS = frozenset((".mkv", ".mp4", ".m4v", ".avi", ".ts", ".m2ts", ".wmv", ".mov",
                               ".mpg", ".mpeg", ".webm"))
 SAMPLE = re.compile(r"\bsample\b", re.I)
+# With a UPS ([setup] ups): the name setup.sh gives it in NUT, the events upsmon hands over
+# (templates/ups-notify), and two files beside the state database: the torrents stopped while
+# on battery, and the grid log (when the mains went out and came back; kept for good).
+UPS = "ups@127.0.0.1"
+UPS_EVENTS = ("ONLINE", "ONBATT", "LOWBATT", "COMMOK", "COMMBAD", "NOCOMM", "SHUTDOWN", "REPLBATT")
+UPS_PAUSED = "ups-paused.json"
+GRID_LOG = "grid.log"
+GRID_HEADER = ("# torrent-box: when the mains power went out and came back, as the UPS saw it.\n"
+               "# Tab-separated: time, out / back (with how long it was out) / shutdown (the box\n"
+               "# powered off on battery). Never rotated: it's a few lines a month.\n")
 
 log = logging.getLogger("rss2transmission")
 
@@ -111,6 +125,7 @@ class Config:
     rpc_user: str
     rpc_password: str
     ntfy_topic: str
+    pause_on_battery: bool = True
     dashboard_url: str = "http://127.0.0.1"  # the start page, which pushes to installed browsers
     push_token_file: str = "/var/lib/torrent-box-dashboard/push-token"
 
@@ -201,6 +216,7 @@ def load_config(config_path, secrets_path=None):
         rpc_user=get(secrets, secrets_path, "secrets", "rpc_user"),
         rpc_password=get(secrets, secrets_path, "secrets", "rpc_password"),
         ntfy_topic=get(secrets, secrets_path, "secrets", "ntfy_topic", "").strip(),
+        pause_on_battery=getbool("transmission", "pause_on_battery", True),
         dashboard_url=get(conf, config_path, "push", "dashboard_url", "http://127.0.0.1").rstrip("/"),
         push_token_file=get(conf, config_path, "push", "token_file",
                             "/var/lib/torrent-box-dashboard/push-token"),
@@ -460,6 +476,7 @@ class Transmission:
         self.url = url
         self.timeout = timeout
         self.session_id = ""
+        self.add_paused = False  # on battery (UPS): new torrents wait for the power too
         self.auth = "Basic " + base64.b64encode(f"{user}:{password}".encode()).decode()
 
     def call(self, method, arguments=None):
@@ -493,6 +510,7 @@ class Transmission:
         args = self.call("torrent-add", {
             "metainfo": base64.b64encode(metainfo).decode(),
             "download-dir": str(download_dir),
+            **({"paused": True} if self.add_paused else {}),
         })
         if "torrent-duplicate" in args:
             return "duplicate", args["torrent-duplicate"].get("hashString")
@@ -947,6 +965,219 @@ def run(cfg, state, tr, ntfy, dry_run=False, catch_up=False):
     return report
 
 
+### UPS (upsmon's notify hook, templates/ups-notify)
+
+def upsc(ups=UPS, timeout=5):
+    """The UPS's variables from NUT ({} if it can't tell)."""
+    try:
+        out = subprocess.run(["upsc", ups], capture_output=True, text=True, timeout=timeout).stdout
+    except (OSError, subprocess.SubprocessError):
+        return {}
+    return dict(line.split(": ", 1) for line in out.splitlines() if ": " in line)
+
+
+def ups_summary(v):
+    """ "battery 87%, about 23 min left, load 14%" from upsc's variables."""
+    parts = []
+    if v.get("battery.charge"):
+        parts.append(f"battery {v['battery.charge']}%")
+    try:
+        parts.append(f"about {duration(float(v['battery.runtime']))} left")
+    except (KeyError, ValueError):
+        pass
+    if v.get("ups.load"):
+        parts.append(f"load {v['ups.load']}%")
+    return ", ".join(parts)
+
+
+def duration(seconds):
+    seconds = max(0, round(seconds))
+    if seconds < 60:
+        return f"{seconds} s"
+    if seconds < 3600:
+        m, s = divmod(seconds, 60)
+        return f"{m} min {s} s" if s and m < 10 else f"{m} min"
+    h, m = divmod(round(seconds / 60), 60)
+    return f"{h} h {m} min" if m else f"{h} h"
+
+
+def grid_events(path):
+    """The grid log as [(datetime, event, rest...)], oldest first."""
+    events = []
+    try:
+        lines = Path(path).read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return events
+    for line in lines:
+        fields = line.split("\t")
+        if line.startswith("#") or len(fields) < 2:
+            continue
+        try:
+            events.append((datetime.fromisoformat(fields[0]), *fields[1:]))
+        except ValueError:
+            continue
+    return events
+
+
+def grid_append(path, when, event, *rest):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a", encoding="utf-8") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        if f.tell() == 0:
+            f.write(GRID_HEADER)
+        f.write("\t".join([when.astimezone().isoformat(timespec="seconds"), event, *rest]) + "\n")
+
+
+def grid_out_since(path):
+    """When the mains went out, if the log's last word is that it's out (or that the box
+    powered off on battery); else None."""
+    events = grid_events(path)
+    if events and events[-1][1] in ("out", "shutdown"):
+        for e in reversed(events):
+            if e[1] == "out":
+                return e[0]
+        return events[-1][0]
+    return None
+
+
+def grid_back(path, when, note=""):
+    """Log the mains coming back; how long it was out, or None if it wasn't out."""
+    since = grid_out_since(path)
+    if since is None:
+        return None
+    seconds = (when - since).total_seconds()
+    grid_append(path, when, "back", duration(seconds), *([note] if note else []))
+    return seconds
+
+
+def boot_time():
+    with open("/proc/uptime") as f:
+        return datetime.now(timezone.utc) - timedelta(seconds=float(f.read().split()[0]))
+
+
+def grid_after_boot(path, ups_vars=upsc, booted=boot_time):
+    """The box powered off on battery and has come back: upsmon doesn't say ONLINE when it
+    starts, so the mains came back when the box booted (the UPS turned its outlets on).
+    Run with every timer run; only looks at the UPS while the log says the power is out."""
+    since = grid_out_since(path)
+    if since is None:
+        return None
+    try:
+        boot = booted()
+    except (OSError, ValueError):
+        return None
+    if boot <= since or "OL" not in ups_vars().get("ups.status", "").split():
+        return None
+    log.info("the mains is back (the box booted at %s)", boot.astimezone().isoformat(timespec="seconds"))
+    return grid_back(path, boot, "the box was off: this is when it booted")
+
+
+def pause_torrents(tr, paused_file):
+    """Stop every torrent that's running; their hashes go to paused_file, for resuming."""
+    torrents = tr.call("torrent-get", {"fields": ["hashString", "status"]}).get("torrents", [])
+    running = [t["hashString"] for t in torrents if t.get("status")]  # 0: stopped
+    earlier = []
+    with contextlib.suppress(OSError, ValueError):
+        earlier = json.loads(Path(paused_file).read_text())  # still out since an earlier event
+    if running:
+        tr.call("torrent-stop", {"ids": running})
+    Path(paused_file).parent.mkdir(parents=True, exist_ok=True)
+    Path(paused_file).write_text(json.dumps(sorted(set(earlier) | set(running))))
+    return len(running)
+
+
+def resume_torrents(tr, paused_file):
+    """Start the torrents pause_torrents stopped (not those you had stopped yourself)."""
+    try:
+        hashes = json.loads(Path(paused_file).read_text())
+    except (OSError, ValueError):
+        return 0
+    if hashes:
+        tr.call("torrent-start", {"ids": hashes})
+    Path(paused_file).unlink()
+    return len(hashes)
+
+
+# event: (title, priority, tags); {host} is the box's name
+UPS_PUSHES = {
+    "ONBATT": ("Power cut: {host} is on battery", "high", ["zap", "warning"]),
+    "LOWBATT": ("UPS battery low: {host} shuts down now", "urgent", ["battery", "rotating_light"]),
+    "SHUTDOWN": ("{host} is shutting down (UPS battery low)", "urgent", ["battery", "rotating_light"]),
+    "ONLINE": ("Power is back on {host}", "default", ["electric_plug"]),
+    "COMMBAD": ("{host} lost touch with the UPS", "high", ["warning"]),
+    "NOCOMM": ("{host} can't reach the UPS", "high", ["warning"]),
+    "COMMOK": ("{host} reaches the UPS again", "default", ["white_check_mark"]),
+    "REPLBATT": ("The UPS battery of {host} needs replacing", "default", ["battery"]),
+}
+
+
+def ups_event(cfg, tr, ntfy, event, state_dir, ups_vars=upsc, when=None):
+    """Handle one of upsmon's events: the grid log, pausing / resuming Transmission, a push.
+    Returns the exit status. None of this is needed for the shutdown: upsmon does that."""
+    state_dir = Path(state_dir)
+    state_dir.mkdir(parents=True, exist_ok=True)
+    # upsmon runs its hook for each event without waiting: on a flicker, ONLINE mustn't
+    # resume before ONBATT has paused
+    with open(state_dir / "ups.lock", "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        return _ups_event(cfg, tr, ntfy, event, state_dir, ups_vars,
+                          when or datetime.now(timezone.utc))
+
+
+def _ups_event(cfg, tr, ntfy, event, state_dir, ups_vars, when):
+    grid, paused_file = state_dir / GRID_LOG, state_dir / UPS_PAUSED
+    v = ups_vars()
+    lines = [s] if (s := ups_summary(v)) else []
+    title, priority, tags = UPS_PUSHES[event]
+    if event == "ONBATT":
+        if grid_out_since(grid) is None:
+            grid_append(grid, when, "out")
+        if cfg.pause_on_battery:
+            try:
+                n = pause_torrents(tr, paused_file)
+                lines.append(f"Transmission: {n} torrent{'s' if n != 1 else ''} paused until the "
+                             "power is back" if n else "Transmission: nothing was running")
+            except (TransmissionUnavailable, TorrentRejected) as e:
+                lines.append(f"Transmission couldn't be paused: {e}")
+    elif event == "ONLINE":
+        seconds = grid_back(grid, when)
+        resumed = None
+        try:
+            resumed = resume_torrents(tr, paused_file)
+        except (TransmissionUnavailable, TorrentRejected) as e:
+            lines.append(f"Transmission couldn't be resumed: {e} (the torrents are still paused)")
+        if seconds is None and not resumed:
+            log.info("UPS on mains (it wasn't out as far as the grid log knows): no push")
+            return 0
+        if seconds is not None:
+            title += f" after {duration(seconds)}"
+        if resumed:
+            lines.append(f"Transmission: {resumed} torrent{'s' if resumed != 1 else ''} resumed")
+    elif event == "SHUTDOWN":
+        if grid_out_since(grid) is not None:
+            grid_append(grid, when, "shutdown")
+        lines.append("It starts again by itself when the power is back (if its BIOS powers on "
+                     "after a power loss).")
+    elif event == "REPLBATT":
+        lines.append("The UPS's self-test says so: the runtime it shows can't be trusted any more.")
+    elif event in ("COMMBAD", "NOCOMM"):
+        lines.append("Without it the box can't shut down cleanly on a power cut. Check the USB "
+                     "cable; details: journalctl -u nut-driver@ups -u nut-monitor")
+    message = "\n".join(lines) or "upsc ups for the details"
+    title = title.format(host=socket.gethostname())
+    if not ntfy.enabled:
+        log.info("%s (notifications are off)", title)
+        return 0
+    try:
+        ntfy.send(title, message, NTFY_PRIORITIES[priority], tags)
+    except NotifyError as e:
+        log.error("push '%s' failed: %s", title, e)
+        return 1
+    log.info("pushed: %s", title)
+    return 0
+
+
 ### Main Entry
 
 def main(argv=None):
@@ -964,6 +1195,9 @@ def main(argv=None):
                          "finished in Transmission as announced, without adding/pushing")
     ap.add_argument("--test-notify", action="store_true",
                     help="send a test push to the configured ntfy topic and exit")
+    ap.add_argument("--ups-event", choices=UPS_EVENTS,
+                    help="upsmon's event (its notify hook runs this): push it, log the grid, "
+                         "pause or resume Transmission, and exit")
     args = ap.parse_args(argv)
 
     logging.basicConfig(
@@ -994,6 +1228,9 @@ def main(argv=None):
             return 1
         log.info("test push sent%s", f" via {cfg.ntfy_server}" if cfg.ntfy_topic else "")
         return 0
+    if args.ups_event:
+        tr = Transmission(cfg.rpc_url, cfg.rpc_user, cfg.rpc_password, min(cfg.timeout, 10))
+        return ups_event(cfg, tr, ntfy, args.ups_event, args.state.parent)
     if not ntfy.enabled:
         log.info("no ntfy_topic in secrets.ini and no start page to push through; notifications are off")
 
@@ -1007,6 +1244,12 @@ def main(argv=None):
         state = State(args.state, readonly=args.dry_run)
         try:
             tr = Transmission(cfg.rpc_url, cfg.rpc_user, cfg.rpc_password, cfg.timeout)
+            tr.add_paused = (args.state.parent / UPS_PAUSED).exists()  # on battery
+            if not args.dry_run:
+                try:
+                    grid_after_boot(args.state.parent / GRID_LOG)
+                except OSError as e:
+                    log.warning("grid log: %s", e)
             report = run(cfg, state, tr, ntfy, dry_run=args.dry_run, catch_up=args.catch_up)
         finally:
             state.close()

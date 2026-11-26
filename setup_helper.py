@@ -29,6 +29,9 @@ Used by setup.sh only; each subcommand does one small job:
                           (`tailscale serve status --json` on stdin)
   service-host            from `tailscale status --json` on stdin: this box's tags (comma-
                           separated), then the services it's approved to host ("-" for none)
+  ups-detect              the first UPS on USB: "vendor:product<TAB>name", or nothing
+  nut-config OUTDIR       NUT's config files for [setup] ups, into OUTDIR; the installed
+                          upsd.users on stdin (its password is kept; empty: a new one)
 Secrets (passwords) are passed through the environment, never on the command line, and
 never printed (but jellyfin-key's key, which setup.sh reads with $(...)).
 """
@@ -1337,6 +1340,84 @@ def render(text, values, strip_comments=False):
     return text
 
 
+### UPS ([setup] ups)
+
+HID_DEVICES = Path("/sys/bus/hid/devices")
+# HID usage pages a UPS describes itself with (the USB HID Power Device spec): what NUT's
+# usbhid-ups driver talks to, whoever made the UPS
+POWER_PAGES = (0x84, 0x85)  # Power Device, Battery System
+NUT_FILES = {"nut.conf": "nut.conf", "ups.conf": "nut-ups.conf", "upsd.conf": "nut-upsd.conf",
+             "upsd.users": "nut-upsd.users", "upsmon.conf": "nut-upsmon.conf"}
+NUT_SECRET_FILES = ("upsd.users", "upsmon.conf")  # root and the nut group only
+
+
+def first_usage_page(descriptor):
+    """The first Usage Page in a HID report descriptor (what the device is), or None."""
+    i = 0
+    while i < len(descriptor):
+        prefix = descriptor[i]
+        if prefix == 0xFE:  # long item: size in the next byte
+            i += 3 + (descriptor[i + 1] if i + 1 < len(descriptor) else 0)
+            continue
+        size = (0, 1, 2, 4)[prefix & 3]
+        if prefix & 0xFC == 0x04:  # global item, tag 0: Usage Page
+            return int.from_bytes(descriptor[i + 1:i + 1 + size], "little")
+        i += 1 + size
+    return None
+
+
+def ups_devices(hid_root=HID_DEVICES):
+    """UPSes on USB: [(vendor:product, name)], from the HID devices whose report descriptor
+    says they're a power device. Readable without root, and with NUT not installed yet."""
+    found = []
+    for dev in sorted(Path(hid_root).glob("0003:*")):  # 0003: USB
+        try:
+            if first_usage_page(dev.joinpath("report_descriptor").read_bytes()) not in POWER_PAGES:
+                continue
+        except OSError:
+            continue
+        _, vendor, product = dev.name.split(".")[0].split(":")
+        usb = dev.resolve().parent.parent  # .../1-5/1-5:1.0/0003:... -> the USB device
+        name = " ".join(filter(None, (
+            _read_attr(usb / "manufacturer"), _read_attr(usb / "product")))) or "UPS"
+        found.append((f"{vendor.lower()}:{product.lower()}", name))
+    return found
+
+
+def _read_attr(path):
+    try:
+        return path.read_text(errors="replace").strip()
+    except OSError:
+        return ""
+
+
+def upsd_password(text):
+    """upsmon's password in an upsd.users, or ""."""
+    parser = configparser.ConfigParser(interpolation=None, strict=False, allow_no_value=True)
+    try:
+        parser.read_string(re.sub(r"(?m)^\s+", "", text))  # NUT indents its keys
+        return parser.get("upsmon", "password", fallback="").strip()
+    except configparser.Error:
+        return ""
+
+
+def nut_config(outdir, low_battery, match, desc, lib, upsd_users="", templates=None):
+    """NUT's config files for setup.sh to install in /etc/nut, written to outdir."""
+    templates = Path(templates or Path(__file__).resolve().parent / "templates")
+    password = upsd_password(upsd_users) or secrets.token_urlsafe(18)
+    vendor, _, product = match.partition(":")
+    values = {"PASSWORD": password, "LOW_BATTERY": str(low_battery), "LIB": lib,
+              "DESC": re.sub(r'["\\\n]', "", desc) or "UPS",
+              # the UPS found on USB, so another USB UPS plugged in later isn't taken for it
+              "MATCH": f"\tvendorid = {vendor}\n\tproductid = {product}\n" if product else ""}
+    outdir = Path(outdir)
+    for name, template in NUT_FILES.items():
+        text = render((templates / template).read_text(encoding="utf-8"), values)
+        path = outdir / name
+        path.touch(mode=0o600)
+        path.write_text(text, encoding="utf-8")
+
+
 def random_topic(length=16):
     alphabet = string.ascii_lowercase + string.digits
     return "torrent-box-" + "".join(secrets.choice(alphabet) for _ in range(length))
@@ -1630,6 +1711,13 @@ def main(argv=None):
     p.add_argument("file")
     p.add_argument("var", nargs="*", help="NAME=VALUE")
     sub.add_parser("random-topic")
+    sub.add_parser("ups-detect")
+    p = sub.add_parser("nut-config")
+    p.add_argument("outdir")
+    p.add_argument("--low-battery", type=int, default=40)
+    p.add_argument("--match", default="", help="vendor:product of the UPS")
+    p.add_argument("--desc", default="")
+    p.add_argument("--lib", default="/usr/local/lib/torrent-box")
     sub.add_parser("tailscale-status")
     sub.add_parser("serve-ports")
     sub.add_parser("serve-services")
@@ -1725,6 +1813,12 @@ def main(argv=None):
                          args.strip_comments), end="")
         elif args.cmd == "random-topic":
             print(random_topic())
+        elif args.cmd == "ups-detect":
+            for match, name in ups_devices()[:1]:
+                print(f"{match}\t{name}")
+        elif args.cmd == "nut-config":
+            nut_config(args.outdir, args.low_battery, args.match, args.desc, args.lib,
+                       sys.stdin.read())
         elif args.cmd == "tailscale-status":
             print(" ".join(v or "-" for v in tailscale_status(sys.stdin.read())))
         elif args.cmd == "serve-ports":

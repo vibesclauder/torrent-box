@@ -53,6 +53,7 @@ class FakeServer:
         self.added = {}            # info hash -> {"download-dir": ..., "metainfo": ...}
         self.tr_torrents = []      # what torrent-get returns; torrent-add appends here
         self.removed = []          # (hash, delete-local-data) of each torrent-remove
+        self.rpc_calls = []        # (method, arguments) of each RPC call that got through
         self.pushes = []           # ntfy messages received (decoded JSON)
         self.ntfy_down = False     # True -> ntfy answers 500
         self.rpc_auth = "Basic " + base64.b64encode(f"{rpc_user}:{rpc_password}".encode()).decode()
@@ -104,6 +105,7 @@ class FakeServer:
                 if self.headers.get("X-Transmission-Session-Id") != server.SESSION_ID:
                     return self._send(409, b"", {"X-Transmission-Session-Id": server.SESSION_ID})
                 req = json.loads(body)
+                server.rpc_calls.append((req["method"], req.get("arguments", {})))
                 if server.rpc_result and req["method"] == "torrent-add":
                     return self._send(200, json.dumps({"result": server.rpc_result}).encode())
                 args = req.get("arguments", {})
@@ -128,6 +130,11 @@ class FakeServer:
                         server.removed.append((info_hash, args.get("delete-local-data")))
                     server.tr_torrents = [t for t in server.tr_torrents
                                           if t["hashString"] not in args["ids"]]
+                    reply = {}
+                elif req["method"] in ("torrent-stop", "torrent-start"):
+                    for t in server.tr_torrents:
+                        if t["hashString"] in args["ids"]:
+                            t["status"] = 0 if req["method"] == "torrent-stop" else 4
                     reply = {}
                 else:
                     reply = {}

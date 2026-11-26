@@ -1,0 +1,10 @@
+#!/bin/sh
+# torrent-box: upsmon's NOTIFYCMD. upsmon runs it as the nut user, with the event in
+# NOTIFYTYPE; it hands the event to rss2transmission, as you, for the push, the grid log and
+# pausing Transmission (/etc/sudoers.d/torrent-box-ups allows exactly these commands). The
+# shutdown doesn't depend on it. Installed by setup.sh to /usr/local/lib/torrent-box/.
+case ${NOTIFYTYPE:-} in
+    ONLINE|ONBATT|LOWBATT|COMMOK|COMMBAD|NOCOMM|SHUTDOWN|REPLBATT) ;;
+    *) exit 0 ;;
+esac
+exec sudo -n -u @USER@ @BIN@ -c @CONFIG@ --ups-event "$NOTIFYTYPE"

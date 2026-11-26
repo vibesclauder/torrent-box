@@ -41,6 +41,7 @@ import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 from html.parser import HTMLParser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -81,11 +82,20 @@ ALERT_AFTER = 10 * 60  # a restart or a slow start shouldn't push
 # rss2transmission warns about the storage disk, Prowlarr about its health (nCore too), and
 # smartd about the disk's; for those only "down" (they can't tell), or nothing.
 ALERT_FROM = {"storage": None, "ncore": None, "prowlarr": "down", "disk": "down",
-              "ntfy": None}  # pushes about our ntfy server would go through it
+              "ntfy": None,  # pushes about our ntfy server would go through it
+              "ups": None}  # upsmon pushes the power's events itself (rss2transmission --ups-event)
 NTFY_PRIORITIES = {"min": 1, "low": 2, "default": 3, "high": 4, "urgent": 5}
 SMART_DIR = Path("/var/lib/smartmontools")  # smartd's attribute logs, every 30 min
 SMART_BAD = [(5, "reallocated"), (197, "pending"), (198, "uncorrectable")]  # sectors
 DISK_HOT = 55  # °C; smartd pushes at this too (smartd.conf -W)
+# [setup] ups: setup.sh writes this when it sets NUT up for the UPS (its name in NUT, the
+# battery percent the box shuts down at, the grid log), and removes it when ups is switched off
+UPS_FILE = Path("/usr/local/share/torrent-box/ups.json")
+UPS_FLAGS = {"OL": "on mains", "OB": "on battery", "LB": "battery low", "CHRG": "charging",
+             "RB": "battery needs replacing", "OVER": "overloaded", "BYPASS": "on bypass",
+             "CAL": "calibrating", "OFF": "off", "FSD": "shutting down", "TEST": "self-test"}
+GRID_DAYS = 30  # the grid's outages the UPS row counts
+GRID_SHOWN = 5  # and lists
 
 OK, WARN, DOWN = "ok", "warn", "down"
 WORST = {OK: 0, WARN: 1, DOWN: 2}
@@ -118,6 +128,7 @@ FOLDED = GROUPS[-1][1]
 ROWS = [
     ("storage", "Storage"),
     ("disk", "Disk health"),
+    ("ups", "UPS"),
     ("rss2transmission", "nCore feed"),
     ("ncore", "nCore search"),
     ("samba", "Samba share"),
@@ -195,6 +206,7 @@ def load_settings(config_path):
         "own_ntfy": get(conf, "setup", "own_ntfy").lower() == "yes",
         "arr": get(conf, "setup", "arr").lower() == "yes",
         "whisparr": get(conf, "setup", "whisparr").lower() == "yes",
+        "ups": get(conf, "setup", "ups").lower() != "no",  # and setup.sh set it up (UPS_FILE)
     }
 
 
@@ -1192,6 +1204,109 @@ def check_disk(s, now=None):
     return result(state, "; ".join(parts) or "smartd is watching", details, io=io)
 
 
+def upsc(ups, timeout=TIMEOUT):
+    """The UPS's variables from NUT's upsc (no login needed), {} if it has none."""
+    try:
+        out = subprocess.run(["upsc", ups], capture_output=True, text=True, timeout=timeout).stdout
+    except (OSError, subprocess.SubprocessError):
+        return {}
+    return dict(line.split(": ", 1) for line in out.splitlines() if ": " in line)
+
+
+def short_duration(seconds):
+    seconds = max(0, int(seconds))
+    if seconds < 60:
+        return f"{seconds} s"
+    if seconds < 3600:
+        return f"{seconds // 60} min"
+    if seconds < 86400:
+        return f"{seconds // 3600} h {seconds % 3600 // 60} min".replace(" 0 min", "")
+    return duration(seconds)
+
+
+def grid_outages(path, now=None, days=GRID_DAYS):
+    """The mains outages in rss2transmission's grid log ending within days (or still going):
+    [(start, seconds or None while it's out, how it ended)], newest first."""
+    now = now or time.time()
+    try:
+        lines = Path(path).read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    outages, start, ended = [], None, ""
+    for line in lines:
+        fields = line.split("\t")
+        if line.startswith("#") or len(fields) < 2:
+            continue
+        try:
+            when = datetime_seconds(fields[0])
+        except ValueError:
+            continue
+        if fields[1] == "out" and start is None:
+            start, ended = when, ""
+        elif fields[1] == "shutdown" and start is not None:
+            ended = "the box shut down"
+        elif fields[1] == "back" and start is not None:
+            outages.append((start, when - start, ended))
+            start = None
+    if start is not None:
+        outages.append((start, None, ended))
+    return [o for o in reversed(outages) if o[1] is None or o[0] + o[1] >= now - days * 86400]
+
+
+def datetime_seconds(text):
+    """"2026-11-26T21:03:04+01:00" -> Unix time."""
+    return datetime.fromisoformat(text).timestamp()
+
+
+def check_ups(s, now=None, info_file=None, ups_vars=upsc):
+    now = now or time.time()
+    try:
+        info = json.loads(Path(info_file or UPS_FILE).read_text())
+    except (OSError, ValueError):
+        info = {}
+    name = info.get("name", "ups")
+    grid = Path(info.get("grid_log") or "~/.local/state/rss2transmission/grid.log").expanduser()
+    metrics = {"low": info.get("low_battery"), "outages": grid_outages(grid, now)}
+    v = ups_vars(f"{name}@127.0.0.1")
+    if not v:
+        return result(DOWN, "NUT has no data from the UPS: the box can't shut down cleanly on "
+                      "a power cut", [f"check the USB cable, then: upsc {name}; sudo journalctl "
+                      f"-u nut-driver@{name} -u nut-server -u nut-monitor"], metrics=metrics)
+    flags = v.get("ups.status", "").split()
+    words = [UPS_FLAGS[f] for f in flags if f in UPS_FLAGS and f != "TEST"]
+    parts = [(words[0].capitalize() if words else (v.get("ups.status") or "status unknown"))
+             + (f" ({', '.join(words[1:])})" if words[1:] else "")]
+    for key, label, cast in (("battery.charge", "charge", float), ("battery.runtime", "runtime", float),
+                             ("ups.load", "load", float)):
+        try:
+            metrics[label] = cast(v[key])
+        except (KeyError, ValueError):
+            pass
+    if "charge" in metrics:
+        parts.append(f"battery {metrics['charge']:.0f}%")
+    if "runtime" in metrics:
+        parts.append(f"{short_duration(metrics['runtime'])} left")
+    if "load" in metrics:
+        parts.append(f"load {metrics['load']:.0f}%")
+    metrics["model"] = " ".join(filter(None, (v.get("device.mfr") or v.get("ups.mfr"),
+                                              v.get("device.model") or v.get("ups.model"))))
+    state, details = OK, []
+    if "LB" in flags or "FSD" in flags:
+        state = DOWN
+        details.append("the battery is low: the box is shutting down")
+    elif "OB" in flags:
+        state = WARN
+        details.append("power cut: the box runs on the UPS's battery"
+                       + (f" and shuts down at {metrics['low']}%" if metrics["low"] else ""))
+    if "RB" in flags:
+        state = max(state, WARN, key=WORST.get)
+        details.append("the UPS's self-test says the battery needs replacing")
+    if "OVER" in flags:
+        state = max(state, WARN, key=WORST.get)
+        details.append("the UPS is overloaded: unplug something from its battery outlets")
+    return result(state, ", ".join(parts), details, metrics=metrics)
+
+
 def cpu_temperature():
     """CPU temperature in °C from hwmon (AMD, Intel, Raspberry Pi), or None."""
     for hwmon in sorted(Path("/sys/class/hwmon").glob("hwmon*")):
@@ -1312,6 +1427,8 @@ def gather(s, arr_dir, pool, last_login=None):
         checks["ntfy"] = check_ntfy
     if s["tailscale"]:
         checks["tailscale"] = check_tailscale
+    if s.get("ups") and UPS_FILE.exists():
+        checks["ups"] = check_ups
     checks["system"] = check_system
 
     def safely(check):
@@ -1964,6 +2081,7 @@ ROW_ICONS = {
     "tailscale": '<circle cx="12" cy="5" r="2"/><circle cx="5" cy="19" r="2"/><circle cx="19" cy="19" r="2"/>'
                  '<path d="M11 6.8 6 17.2M13 6.8l5 10.4M7 19h10"/>',
     "disk": '<path d="M3 12h4l2.5-6 5 12 2.5-6h4"/>',
+    "ups": '<rect x="2.5" y="7" width="16" height="10" rx="2"/><path d="M21.5 10.5v3M11.5 8.5l-2.5 3.5h4l-2.5 3.5"/>',
     "ntfy": '<path d="M6 16V11a6 6 0 0 1 12 0v5l1.5 2h-15zM10 20.5a2 2 0 0 0 4 0"/>',
     "system": '<rect x="6" y="6" width="12" height="12" rx="2"/>'
               '<path d="M9.5 2.5V6M14.5 2.5V6M9.5 18v3.5M14.5 18v3.5M2.5 9.5H6M2.5 14.5H6M18 9.5h3.5M18 14.5h3.5"/>',
@@ -2376,6 +2494,37 @@ def system_html(c, now):
     summary = html.escape(c["summary"])
     return more_html("system", summary, f'<div class="meters">{"".join(meters)}</div>') \
         if meters else summary
+
+
+def ups_html(c, now):
+    """The UPS row's summary, opening to meters (battery, load) and the grid's outages."""
+    m = c.get("metrics") or {}
+    meters, e = [], html.escape
+    low = m.get("low")
+    if "charge" in m:
+        meters.append(meter("Battery", f"{m['charge']:.0f}%",
+                            f"shuts down at {low}%" if low else "",
+                            bar_html([m["charge"]], bool(low) and m["charge"] < low + 15)))
+    if "runtime" in m:
+        meters.append(meter("Runtime", short_duration(m["runtime"]), "at this load"))
+    if "load" in m:
+        meters.append(meter("Load", f"{m['load']:.0f}%", m.get("model") or "",
+                            bar_html([m["load"]], m["load"] >= 80)))
+    outages = m.get("outages", [])
+    if outages:
+        lines = []
+        for start, seconds, ended in outages[:GRID_SHOWN]:
+            when = time.strftime("%b %d %H:%M", time.localtime(start))
+            how = "still out" if seconds is None else f"out {short_duration(seconds)}"
+            lines.append(f"<li>{e(when)}: {e(how)}{e(', ' + ended) if ended else ''}</li>")
+        done = [s for _, s, _ in outages if s is not None]
+        head = (f"{len(outages)} power cut{'s' if len(outages) != 1 else ''} in {GRID_DAYS} days"
+                + (f", {short_duration(sum(done))} in all" if done else ""))
+        grid = f'<div class="muted">Grid: {e(head)}</div><ul class="details">{"".join(lines)}</ul>'
+    else:
+        grid = f'<div class="muted">Grid: no power cuts in {GRID_DAYS} days</div>'
+    summary = e(c["summary"])
+    return more_html("ups", summary, f'<div class="meters">{"".join(meters)}</div>{grid}')
 
 
 def details_html(details):
@@ -2793,6 +2942,8 @@ def render(status, host, https=False, recent=()):
             body = system_html(c, status["time"])
         elif cid == "disk":
             body = disk_io_html(c, status["time"])
+        elif cid == "ups":
+            body = ups_html(c, status["time"])
         elif cid == "storage":
             if "percent" in c:
                 extra = (f'<div class="bar {c["state"]}"><i style="width:{c["percent"]}%"></i></div>'

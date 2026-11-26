@@ -64,6 +64,14 @@ NTFY_KEY_FP=55BA774A6F5EE67431E4B6B7CFDB962D4F1EC4AF  # as ntfy's install docs g
 NTFY_SOURCES=/etc/apt/sources.list.d/ntfy.sources
 NTFY_PIN=/etc/apt/preferences.d/ntfy
 SMARTD_CONF=/etc/smartd.conf
+# [setup] ups: NUT watches a UPS on USB and shuts the box down on low battery
+UPS_NAME=ups  # the UPS's name in NUT (upsc ups); rss2transmission.UPS
+UPS_EVENTS=(ONLINE ONBATT LOWBATT COMMOK COMMBAD NOCOMM SHUTDOWN REPLBATT)  # rss2transmission.UPS_EVENTS
+UPS_LOW_DEFAULT=40  # [setup] ups_low_battery when empty: shut down at this battery percent
+NUT_DIR=/etc/nut
+NUT_FILES=(nut.conf ups.conf upsd.conf upsd.users upsmon.conf)  # setup_helper.NUT_FILES
+UPS_MARKER=/usr/local/share/torrent-box/ups.json  # NUT is set up by us; dashboard.UPS_FILE
+UPS_SUDOERS=/etc/sudoers.d/torrent-box-ups  # lets upsmon's notify hook run rss2transmission
 JF_VAINFO=/usr/lib/jellyfin-ffmpeg/vainfo  # comes with jellyfin-ffmpeg, with its VAAPI drivers
 USER=${USER:-$(id -un)}
 
@@ -108,6 +116,8 @@ Answers can be given as environment variables instead of prompts:
                  that has a topic keeps it; later: config.ini [setup])
   OWN_NTFY       yes or no: pushes through an ntfy server on this box instead of ntfy.sh
                  (asked once, later: config.ini [setup])
+  UPS            auto, yes or no: NUT for a UPS on USB, which shuts the box down on low
+                 battery (default auto: on when a UPS is plugged in; later: config.ini [setup])
   ARR            yes or no: Prowlarr, Sonarr, Radarr and Seerr in Docker (first run only)
   WHISPARR       yes or no: Whisparr and Desireerr too, for nCore's XXX categories (with
                  ARR=yes; asked once, later: config.ini [setup])
@@ -254,10 +264,11 @@ is_unchanged() {
 
 helper() { PYTHONDONTWRITEBYTECODE=1 python3 "$REPO/setup_helper.py" "$@"; }
 
-# Install SRC as DEST (mode MODE, as root if 4th arg is "root") unless it's already identical.
+# Install SRC as DEST (mode MODE, as root if 4th arg is "root", in group GROUP if a 5th is
+# given) unless it's already identical.
 # Returns 0 if DEST changed (or would change), 1 if it was up to date.
 update_file() {
-    local src=$1 dest=$2 mode=$3 owner=${4:-}
+    local src=$1 dest=$2 mode=$3 owner=${4:-} group=${5:-}
     if [[ -f $dest ]] && { cmp -s "$src" "$dest" ||
             # root's own file (push holds the topic): compared as root, else it's new every run.
             # A dry run doesn't ask for the password for it.
@@ -282,7 +293,7 @@ update_file() {
     fi
     if [[ -f $dest ]]; then changed "file updated: $dest"; else changed "file created: $dest"; fi
     if [[ $owner == root ]]; then
-        sudo install -D -m "$mode" "$src" "$dest"
+        sudo install -D -m "$mode" ${group:+-g "$group"} "$src" "$dest"
     else
         install -D -m "$mode" "$src" "$dest"
     fi
@@ -935,6 +946,36 @@ choose_download_speed() {
         die "download_mbps must be a whole number of Mbit/s, not '$download_mbps'"
 }
 
+# [setup] ups: not asked (auto suits every box: on only with a UPS on USB). Sets ups (the
+# setting), ups_on (yes: NUT is set up this run), ups_device / ups_model (the UPS found on USB:
+# vendor:product and its name, "" if none) and ups_low (the battery percent to shut down at).
+choose_ups() {
+    local saved
+    saved=$(ini "$config_src" setup ups)
+    if [[ -n $saved ]]; then
+        ups=$saved
+        if [[ -n ${UPS:-} && $UPS != "$saved" ]]; then
+            warn "ignoring UPS=$UPS: $CONFIG says $saved (change [setup] ups there to switch)"
+        fi
+    else
+        ups=${UPS:-auto}
+    fi
+    case $ups in auto|yes|no) ;; *) die "ups must be auto, yes or no, not '$ups'" ;; esac
+    ups_device="" ups_model=""
+    IFS=$'\t' read -r ups_device ups_model < <(helper ups-detect || true) || true
+    ups_on=no
+    case $ups in
+        yes) ups_on=yes ;;
+        # once set up, a UPS that's unplugged while setup runs doesn't switch NUT off
+        auto) if [[ -n $ups_device || -f $UPS_MARKER ]]; then ups_on=yes; fi ;;
+    esac
+    ups_low=$(ini "$config_src" setup ups_low_battery)
+    ups_low=${ups_low:-$UPS_LOW_DEFAULT}
+    if ! [[ $ups_low =~ ^[0-9]{1,2}$ ]] || (( ups_low < 10 || ups_low > 90 )); then
+        die "ups_low_battery must be a percent from 10 to 90, not '$ups_low'"
+    fi
+}
+
 ### 3. systemd drop-ins for transmission-daemon, the media server and Samba
 
 install_dropins() {
@@ -1219,7 +1260,7 @@ setup_config() {
     fi
     # Remember the choices, so re-runs don't ask again.
     local key updates=()
-    for key in media_server samba avahi tailscale tailscale_https ntfy own_ntfy arr whisparr download_mbps; do
+    for key in media_server samba avahi tailscale tailscale_https ntfy own_ntfy arr whisparr ups download_mbps; do
         [[ $key != tailscale_https || $tailscale == yes ]] || continue  # asked once Tailscale is on
         [[ $(ini "$CONFIG" setup "$key") == "${!key}" ]] || updates+=("$key=${!key}")
     done
@@ -2071,6 +2112,132 @@ setup_rss2transmission() {
     fi
 }
 
+### 11a. UPS
+
+# A root-only file's contents ("" if it's missing; a dry run doesn't ask for the password).
+root_cat() {
+    if (( DRY_RUN )); then sudo -n cat "$1" 2>/dev/null || true; else sudo cat "$1" 2>/dev/null || true; fi
+}
+
+# [setup] ups: NUT (driver, upsd, upsmon) watches the UPS and shuts the box down when its battery
+# runs low: NUT's own job, which needs nothing of torrent-box's. On top of that, upsmon's notify
+# hook hands its events to rss2transmission (as you, through a sudoers rule for exactly those
+# commands) for the pushes, the grid log and pausing Transmission. The package's config files
+# are kept as *.before-torrent-box and put back when ups is switched to no.
+setup_ups() {
+    step "UPS (NUT)"
+    if [[ $ups_on != yes ]]; then
+        remove_ups
+        return
+    fi
+    if [[ -n $ups_device ]]; then
+        info "found on USB: $ups_model ($ups_device)"
+    elif [[ $ups == yes ]]; then
+        warn "ups = yes, but there's no UPS on USB: NUT is set up for the first one plugged in"
+    else
+        warn "the UPS isn't on USB now; NUT stays set up for it ([setup] ups = no removes it)"
+    fi
+    apt_install nut-client nut-server
+    local ours=0 mode users="" changed=0 f u status="" _
+    [[ ! -f $UPS_MARKER ]] || ours=1
+    if (( ! ours )); then
+        mode=$(root_cat "$NUT_DIR/nut.conf" | sed -n "s/^[[:space:]]*MODE[[:space:]]*=[[:space:]]*//p" |
+            tr -d "\"' " | tail -n 1)
+        if [[ -n $mode && $mode != none ]]; then
+            warn "NUT is already set up on this box (MODE=$mode in $NUT_DIR/nut.conf), not by torrent-box: left as it is"
+            return
+        fi
+        # the package's files, to put back when ups is switched off
+        if (( DRY_RUN )); then
+            info "would keep the package's $NUT_DIR files as *.before-torrent-box"
+        else
+            sudo sh -c 'for f; do [ ! -e "$f" ] || [ -e "$f.before-torrent-box" ] ||
+                cp -p "$f" "$f.before-torrent-box"; done' sh "${NUT_FILES[@]/#/$NUT_DIR/}"
+        fi
+    else
+        users=$(root_cat "$NUT_DIR/upsd.users")  # its password is kept
+    fi
+    mkdir -p "$TMP/nut"
+    helper nut-config "$TMP/nut" --low-battery "$ups_low" --match "$ups_device" \
+        --desc "$ups_model" --lib "$LIB" <<<"$users"
+    for f in "${NUT_FILES[@]}"; do  # all root and the nut group's only, as the package has them
+        if update_file "$TMP/nut/$f" "$NUT_DIR/$f" 640 root nut; then changed=1; fi
+    done
+    helper render "$REPO/templates/ups-notify" "USER=$USER" "BIN=$BIN" "CONFIG=$CONFIG" \
+        >"$TMP/ups-notify"
+    update_file "$TMP/ups-notify" "$LIB/ups-notify" 755 root || true
+    local cmds=() e
+    for e in "${UPS_EVENTS[@]}"; do cmds+=("$BIN -c $CONFIG --ups-event $e"); done
+    helper render "$REPO/templates/ups-sudoers" "USER=$USER" \
+        "COMMANDS=$(printf '%s, ' "${cmds[@]}" | sed 's/, $//')" >"$TMP/ups-sudoers"
+    visudo -cqf "$TMP/ups-sudoers" >/dev/null || die "the sudoers rule for the UPS's notify hook doesn't parse (spaces in $HOME?)"
+    update_file "$TMP/ups-sudoers" "$UPS_SUDOERS" 440 root || true
+    python3 -c 'import json, sys; print(json.dumps({"name": sys.argv[1], "low_battery": int(sys.argv[2]), "grid_log": sys.argv[3]}))' \
+        "$UPS_NAME" "$ups_low" "$STATE_DIR/grid.log" >"$TMP/ups.json"
+    update_file "$TMP/ups.json" "$UPS_MARKER" 644 root || true
+
+    # the driver's instance (nut-driver@ups) from ups.conf, as the package's enumerator makes it
+    if (( changed )) && [[ -x /usr/sbin/upsdrvsvcctl ]]; then as_root upsdrvsvcctl resync; fi
+    for u in nut.target nut-driver.target "nut-driver@$UPS_NAME.service" nut-server.service nut-monitor.service; do
+        systemctl is-enabled -q "$u" 2>/dev/null || as_root systemctl enable "$u"
+    done
+    if (( changed )) || ! systemctl is-active -q nut-monitor 2>/dev/null; then
+        as_root systemctl restart "nut-driver@$UPS_NAME.service" nut-server.service nut-monitor.service
+    fi
+    (( ! DRY_RUN )) || return 0
+    for _ in $(seq 30); do
+        status=$(upsc "$UPS_NAME@127.0.0.1" ups.status 2>/dev/null) && break
+        sleep 1
+    done
+    if [[ -n $status ]]; then
+        info "NUT sees it: status $status, battery $(upsc "$UPS_NAME@127.0.0.1" battery.charge 2>/dev/null || echo ?)%;" \
+            "shuts the box down at ${ups_low}% or 5 min left"
+    else
+        warn "NUT doesn't see the UPS (yet). Check: upsc $UPS_NAME; sudo journalctl -u nut-driver@$UPS_NAME -u nut-server -u nut-monitor"
+    fi
+}
+
+# [setup] ups off (or auto without a UPS): undo what setup_ups did, if it did. The nut
+# packages stay (like ntfy's); the grid log stays too, it's your history.
+remove_ups() {
+    local u f
+    if [[ ! -f $UPS_MARKER ]]; then
+        if [[ $ups == no ]]; then
+            info "not used ([setup] ups = no in $CONFIG)"
+        else
+            info "no UPS on USB ([setup] ups = auto in $CONFIG): nothing to do"
+        fi
+        return
+    fi
+    info "[setup] ups = $ups: NUT is stopped and its config goes back to the package's"
+    for u in nut.target nut-monitor.service nut-server.service "nut-driver@$UPS_NAME.service" nut-driver.target; do
+        if systemctl is-enabled -q "$u" 2>/dev/null || systemctl is-active -q "$u" 2>/dev/null; then
+            as_root systemctl disable --now "$u"
+        fi
+    done
+    if (( DRY_RUN )); then
+        info "would put back the package's $NUT_DIR files (*.before-torrent-box)"
+    else
+        for f in "${NUT_FILES[@]}"; do
+            if sudo test -e "$NUT_DIR/$f.before-torrent-box"; then
+                sudo mv -f "$NUT_DIR/$f.before-torrent-box" "$NUT_DIR/$f"
+            elif [[ $f == nut.conf ]]; then
+                printf 'MODE=none\n' >"$TMP/nut.conf"
+                sudo install -m 640 -g nut "$TMP/nut.conf" "$NUT_DIR/nut.conf"
+            else
+                sudo rm -f "$NUT_DIR/$f"
+            fi
+        done
+        changed "NUT config: back to the package's ($NUT_DIR)"
+    fi
+    as_root rm -f "$UPS_SUDOERS" "$LIB/ups-notify" /etc/killpower "$UPS_MARKER"
+    if [[ -f $STATE_DIR/ups-paused.json ]]; then  # switched off during a power cut
+        info "torrents paused for the power cut stay paused: start them in Transmission"
+        run rm -f "$STATE_DIR/ups-paused.json"
+    fi
+    [[ ! -f $STATE_DIR/grid.log ]] || info "the grid log stays: $STATE_DIR/grid.log"
+}
+
 ### 12. Start page
 
 # dashboard.py on port 80: links to the web apps and their health. A system unit running as
@@ -2587,6 +2754,7 @@ finish() {
     [[ $tailscale != yes ]] || svcs+=(tailscaled)
     [[ $own_ntfy != yes ]] || svcs+=(ntfy)
     svcs+=(smartmontools torrent-box-dashboard)
+    [[ $ups_on != yes ]] || svcs+=("nut-driver@$UPS_NAME" nut-server nut-monitor)
     for svc in "${svcs[@]}"; do
         printf '   %-24s %s\n' "$svc" "$(systemctl is-active "$svc" 2>/dev/null || true)"
     done
@@ -2623,6 +2791,10 @@ finish() {
     fi
     [[ -z ${disk_dev:-} ]] ||
         info "Disk health:            smartd watches $disk_dev; problems come as urgent pushes"
+    if [[ $ups_on == yes ]]; then
+        info "UPS:                    ${ups_model:-NUT} (upsc $UPS_NAME): shuts the box down at ${ups_low}% battery"
+        info "                        or 5 min left; power cuts are pushed and logged in $STATE_DIR/grid.log"
+    fi
     if [[ $arr == yes && $(ini "$config_src" setup arr_auto_update) != no ]]; then
         info "App updates:            weekly (Monday ~04:30), and within the hour when an app says a new"
         info "                        version is out; pushed when an app got a new version"
@@ -2719,6 +2891,7 @@ main() {
     choose_arr
     choose_whisparr
     choose_download_speed
+    choose_ups
     setup_storage
     install_dropins
     setup_secrets
@@ -2734,6 +2907,7 @@ main() {
     setup_arr
     setup_arr_updates
     setup_rss2transmission
+    setup_ups  # after rss2transmission, whose --ups-event upsmon's notify hook runs
     setup_desireerr
     setup_xxx_library
     setup_tailscale_https
