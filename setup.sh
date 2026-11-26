@@ -961,8 +961,19 @@ choose_ups() {
         ups=${UPS:-auto}
     fi
     case $ups in auto|yes|no) ;; *) die "ups must be auto, yes or no, not '$ups'" ;; esac
-    ups_device="" ups_model=""
+    ups_device="" ups_model="" ups_seen=0
     IFS=$'\t' read -r ups_device ups_model < <(helper ups-detect || true) || true
+    if [[ -z $ups_device && -f $UPS_MARKER ]]; then
+        # NUT's driver holds it: the kernel let go of it, so it isn't a HID device any more.
+        # The one setup found before (kept with the marker) is still the one.
+        IFS=$'\t' read -r ups_device ups_model < <(python3 -c 'import json, sys
+d = json.load(open(sys.argv[1])); print(d.get("device", ""), d.get("model", ""), sep="\t")' \
+            "$UPS_MARKER" 2>/dev/null || true) || true
+        if [[ -z $ups_device ]]; then  # a marker from before it kept the device
+            IFS=$'\t' read -r ups_device ups_model < <(helper ups-detect --claimed || true) || true
+        fi
+        [[ -z $ups_device ]] || ups_seen=1
+    fi
     ups_on=no
     case $ups in
         yes) ups_on=yes ;;
@@ -2130,7 +2141,9 @@ setup_ups() {
         remove_ups
         return
     fi
-    if [[ -n $ups_device ]]; then
+    if (( ups_seen )); then
+        info "the UPS set up before: $ups_model ($ups_device)"
+    elif [[ -n $ups_device ]]; then
         info "found on USB: $ups_model ($ups_device)"
     elif [[ $ups == yes ]]; then
         warn "ups = yes, but there's no UPS on USB: NUT is set up for the first one plugged in"
@@ -2138,6 +2151,7 @@ setup_ups() {
         warn "the UPS isn't on USB now; NUT stays set up for it ([setup] ups = no removes it)"
     fi
     apt_install nut-client nut-server
+    ups_udev
     local ours=0 mode users="" changed=0 f u status="" _
     [[ ! -f $UPS_MARKER ]] || ours=1
     if (( ! ours )); then
@@ -2172,8 +2186,9 @@ setup_ups() {
         "COMMANDS=$(printf '%s, ' "${cmds[@]}" | sed 's/, $//')" >"$TMP/ups-sudoers"
     visudo -cqf "$TMP/ups-sudoers" >/dev/null || die "the sudoers rule for the UPS's notify hook doesn't parse (spaces in $HOME?)"
     update_file "$TMP/ups-sudoers" "$UPS_SUDOERS" 440 root || true
-    python3 -c 'import json, sys; print(json.dumps({"name": sys.argv[1], "low_battery": int(sys.argv[2]), "grid_log": sys.argv[3]}))' \
-        "$UPS_NAME" "$ups_low" "$STATE_DIR/grid.log" >"$TMP/ups.json"
+    python3 -c 'import json, sys; print(json.dumps(dict(zip(("name", "low_battery", "grid_log", "device", "model"),
+        (sys.argv[1], int(sys.argv[2]), *sys.argv[3:])))))' \
+        "$UPS_NAME" "$ups_low" "$STATE_DIR/grid.log" "$ups_device" "$ups_model" >"$TMP/ups.json"
     update_file "$TMP/ups.json" "$UPS_MARKER" 644 root || true
 
     # the driver's instance (nut-driver@ups) from ups.conf, as the package's enumerator makes it
@@ -2182,7 +2197,12 @@ setup_ups() {
         systemctl is-enabled -q "$u" 2>/dev/null || as_root systemctl enable "$u"
     done
     if (( changed )) || ! systemctl is-active -q nut-monitor 2>/dev/null; then
-        as_root systemctl restart "nut-driver@$UPS_NAME.service" nut-server.service nut-monitor.service
+        # the package started them at install, with its empty config: they failed, and a start
+        # right after that is refused ("Start request repeated too quickly")
+        as_root systemctl reset-failed "nut-driver@$UPS_NAME.service" nut-server.service nut-monitor.service || true
+        # a failed start isn't the end of setup: the check below says what to look at
+        as_root systemctl restart "nut-driver@$UPS_NAME.service" nut-server.service nut-monitor.service ||
+            warn "NUT didn't start; the details follow"
     fi
     (( ! DRY_RUN )) || return 0
     for _ in $(seq 30); do
@@ -2195,6 +2215,29 @@ setup_ups() {
     else
         warn "NUT doesn't see the UPS (yet). Check: upsc $UPS_NAME; sudo journalctl -u nut-driver@$UPS_NAME -u nut-server -u nut-monitor"
     fi
+}
+
+# The package's udev rule lets the nut group open the UPS, but udev applies rules when a device
+# is plugged in: a UPS that was on USB before NUT was installed is still root's, and the driver
+# (running as nut) gets "insufficient permissions". Replaying its "add" applies the rule.
+ups_udev() {
+    local vendor product
+    [[ -n $ups_device ]] || return 0
+    IFS=: read -r vendor product <<<"$ups_device"
+    if (( ! DRY_RUN )) && [[ $(ups_dev_group "$vendor" "$product") == nut ]]; then return 0; fi
+    as_root udevadm trigger --action=add --subsystem-match=usb \
+        --attr-match=idVendor="$vendor" --attr-match=idProduct="$product"
+    (( DRY_RUN )) || sudo udevadm settle --timeout=10 || true
+}
+
+# The group of the USB device node with this vendor and product ("" if it isn't plugged in).
+ups_dev_group() {
+    local d
+    for d in /sys/bus/usb/devices/*; do
+        [[ -f $d/idVendor && $(<"$d/idVendor") == "$1" && $(<"$d/idProduct") == "$2" ]] || continue
+        stat -c %G "/dev/bus/usb/$(printf %03d "$(<"$d/busnum")")/$(printf %03d "$(<"$d/devnum")")" 2>/dev/null
+        return 0
+    done
 }
 
 # [setup] ups off (or auto without a UPS): undo what setup_ups did, if it did. The nut

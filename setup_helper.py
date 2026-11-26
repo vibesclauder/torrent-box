@@ -1343,6 +1343,7 @@ def render(text, values, strip_comments=False):
 ### UPS ([setup] ups)
 
 HID_DEVICES = Path("/sys/bus/hid/devices")
+USB_DEVICES = Path("/sys/bus/usb/devices")
 # HID usage pages a UPS describes itself with (the USB HID Power Device spec): what NUT's
 # usbhid-ups driver talks to, whoever made the UPS
 POWER_PAGES = (0x84, 0x85)  # Power Device, Battery System
@@ -1381,6 +1382,24 @@ def ups_devices(hid_root=HID_DEVICES):
         name = " ".join(filter(None, (
             _read_attr(usb / "manufacturer"), _read_attr(usb / "product")))) or "UPS"
         found.append((f"{vendor.lower()}:{product.lower()}", name))
+    return found
+
+
+def claimed_hid_devices(usb_root=USB_DEVICES):
+    """USB devices with a HID interface that a user-space driver holds (bound to usbfs): what
+    a UPS looks like while NUT's driver runs, since the kernel then lets go of it and it's no
+    HID device any more. [(vendor:product, name)]. Only for a box where setup set NUT up."""
+    found = []
+    for iface in sorted(Path(usb_root).glob("*:*")):
+        try:
+            if (_read_attr(iface / "bInterfaceClass") != "03"
+                    or (iface / "driver").resolve().name != "usbfs"):
+                continue
+        except OSError:
+            continue
+        usb = iface.resolve().parent
+        name = " ".join(filter(None, (_read_attr(usb / "manufacturer"), _read_attr(usb / "product"))))
+        found.append((f"{_read_attr(usb / 'idVendor')}:{_read_attr(usb / 'idProduct')}", name or "UPS"))
     return found
 
 
@@ -1711,7 +1730,9 @@ def main(argv=None):
     p.add_argument("file")
     p.add_argument("var", nargs="*", help="NAME=VALUE")
     sub.add_parser("random-topic")
-    sub.add_parser("ups-detect")
+    p = sub.add_parser("ups-detect")
+    p.add_argument("--claimed", action="store_true",
+                   help="a HID device a user-space driver (NUT's) holds instead")
     p = sub.add_parser("nut-config")
     p.add_argument("outdir")
     p.add_argument("--low-battery", type=int, default=40)
@@ -1814,7 +1835,7 @@ def main(argv=None):
         elif args.cmd == "random-topic":
             print(random_topic())
         elif args.cmd == "ups-detect":
-            for match, name in ups_devices()[:1]:
+            for match, name in (claimed_hid_devices() if args.claimed else ups_devices())[:1]:
                 print(f"{match}\t{name}")
         elif args.cmd == "nut-config":
             nut_config(args.outdir, args.low_battery, args.match, args.desc, args.lib,

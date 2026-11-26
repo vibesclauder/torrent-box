@@ -213,6 +213,21 @@ class DetectTest(unittest.TestCase):
             self.assertEqual(sh.ups_devices(hid), [("0463:ffff", "EATON Ellipse PRO")])
             self.assertEqual(sh.ups_devices(tmp / "nothing"), [])
 
+            # NUT's driver holds the UPS: no HID device, its interface bound to usbfs
+            usb = tmp / "bus/usb/devices"
+            usb.mkdir(parents=True)
+            drivers = tmp / "bus/usb/drivers"
+            for name in ("usbfs", "usbhid"):
+                (drivers / name).mkdir(parents=True)
+            for dev, driver in (("1-4", "usbhid"), ("1-5", "usbfs")):
+                iface = tmp / "devices/usb1" / dev / f"{dev}:1.0"
+                (iface / "bInterfaceClass").write_text("03\n")
+                (iface / "driver").symlink_to(drivers / driver)
+                (iface.parent / "idVendor").write_text("0463\n" if dev == "1-5" else "046d\n")
+                (iface.parent / "idProduct").write_text("ffff\n" if dev == "1-5" else "c52b\n")
+                (usb / f"{dev}:1.0").symlink_to(iface)
+            self.assertEqual(sh.claimed_hid_devices(usb), [("0463:ffff", "EATON Ellipse PRO")])
+
 
 class NutConfigTest(unittest.TestCase):
     def setUp(self):
@@ -346,6 +361,11 @@ apt_install() {{ info "would install: $*"; }}
         self.assertEqual(self.choose(), "auto yes 40 [0463:ffff] [EATON Ellipse PRO]")
         self.assertEqual(self.choose(detect=""), "auto no 40 [] []")  # boxes without one: nothing
         self.assertEqual(self.choose(detect="", marker=True), "auto yes 40 [] []")  # unplugged now
+        # NUT's driver holds it (no longer a HID device): the one in the marker
+        (self.tmp / "ups.json").write_text('{"device": "0463:ffff", "model": "EATON Ellipse PRO"}')
+        result = self.bash('choose_ups; echo "$ups_on [$ups_device] [$ups_model] $ups_seen"', detect="")
+        self.assertEqual(result.stdout.strip().splitlines()[-1], "yes [0463:ffff] [EATON Ellipse PRO] 1")
+        (self.tmp / "ups.json").unlink()
         self.assertEqual(self.choose(ups="no"), "no no 40 [0463:ffff] [EATON Ellipse PRO]")
         self.assertEqual(self.choose(ups="yes", detect="", low="30"), "yes yes 30 [] []")
         for bad in ({"ups": "maybe"}, {"low": "5"}, {"low": "40%"}):
@@ -359,6 +379,8 @@ apt_install() {{ info "would install: $*"; }}
         out = result.stdout
         self.assertIn("found on USB: EATON Ellipse PRO (0463:ffff)", out)
         self.assertIn("would install: nut-client nut-server", out)
+        self.assertIn("would run: sudo udevadm trigger --action=add --subsystem-match=usb "
+                      "--attr-match=idVendor=0463 --attr-match=idProduct=ffff", out)
         for f in sh.NUT_FILES:
             self.assertIn(f"would create {self.tmp}/etc-nut/{f} (mode 640)", out)
         self.assertIn(f"would create {self.tmp}/lib/ups-notify", out)
@@ -369,7 +391,8 @@ apt_install() {{ info "would install: $*"; }}
         sudoers = (self.tmp / "work/ups-sudoers").read_text()
         self.assertIn("/home/alice/.local/bin/rss2transmission -c", sudoers)
         self.assertEqual(json.loads((self.tmp / "work/ups.json").read_text()),
-                         {"name": "ups", "low_battery": 40, "grid_log": f"{self.tmp}/state/grid.log"})
+                         {"name": "ups", "low_battery": 40, "grid_log": f"{self.tmp}/state/grid.log",
+                          "device": "0463:ffff", "model": "EATON Ellipse PRO"})
 
     def test_off(self):
         result = self.bash("choose_ups; setup_ups", detect="")
