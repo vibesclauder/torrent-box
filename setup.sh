@@ -2211,7 +2211,7 @@ setup_ups() {
     done
     if [[ -n $status ]]; then
         info "NUT sees it: status $status, battery $(upsc "$UPS_NAME@127.0.0.1" battery.charge 2>/dev/null || echo ?)%;" \
-            "shuts the box down at ${ups_low}% or 5 min left"
+            "shuts the box down at ${ups_low}% or 2 min left"
     else
         warn "NUT doesn't see the UPS (yet). Check: upsc $UPS_NAME; sudo journalctl -u nut-driver@$UPS_NAME -u nut-server -u nut-monitor"
     fi
@@ -2836,7 +2836,7 @@ finish() {
         info "Disk health:            smartd watches $disk_dev; problems come as urgent pushes"
     if [[ $ups_on == yes ]]; then
         info "UPS:                    ${ups_model:-NUT} (upsc $UPS_NAME): shuts the box down at ${ups_low}% battery"
-        info "                        or 5 min left; power cuts are pushed and logged in $STATE_DIR/grid.log"
+        info "                        or 2 min left; power cuts are pushed and logged in $STATE_DIR/grid.log"
     fi
     if [[ $arr == yes && $(ini "$config_src" setup arr_auto_update) != no ]]; then
         info "App updates:            weekly (Monday ~04:30), and within the hour when an app says a new"

@@ -133,8 +133,8 @@ class UpsEventTest(unittest.TestCase):
         self.assertEqual(len(self.grid_lines()), 3)
 
     def test_low_battery_on_mains_pushes_nothing(self):
-        # a PC on the same UPS: full charge, but under 5 min left at its load
-        heavy = {**ON_MAINS, "ups.status": "OL CHRG LB", "battery.runtime": "228"}
+        # a PC on the same UPS: full charge, but under 2 min left at its load
+        heavy = {**ON_MAINS, "ups.status": "OL CHRG LB", "battery.runtime": "95"}
         self.assertEqual(self.event("LOWBATT", T0, heavy), 0)
         self.assertEqual(self.server.pushes, [])
         self.event("LOWBATT", T0, {})  # NUT can't tell: push, to be safe
@@ -256,6 +256,7 @@ class NutConfigTest(unittest.TestCase):
         self.assertIn("\tvendorid = 0463\n\tproductid = ffff\n", f["ups.conf"])
         self.assertIn('desc = "EATON Ellipse PRO"', f["ups.conf"])
         self.assertIn("override.battery.charge.low = 40", f["ups.conf"])
+        self.assertIn("override.battery.runtime.low = 120", f["ups.conf"])
         self.assertIn("\tignorelb\n", f["ups.conf"])
         self.assertIn("LISTEN 127.0.0.1 3493", f["upsd.conf"])
         self.assertIn("NOTIFYCMD /usr/local/lib/torrent-box/ups-notify", f["upsmon.conf"])
