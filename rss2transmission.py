@@ -1153,6 +1153,13 @@ def _ups_event(cfg, tr, ntfy, event, state_dir, ups_vars, when):
     v = ups_vars()
     lines = [s] if (s := ups_summary(v)) else []
     title, priority, tags = UPS_PUSHES[event]
+    status = v.get("ups.status", "").split()
+    if event == "LOWBATT" and "OL" in status and "OB" not in status:
+        # NUT works "low" out from the runtime left at the present load (ignorelb), on mains
+        # too: a heavy load on the UPS (a PC sharing it) gets the estimate under the limit at
+        # full charge. upsmon shuts down only on battery, so this is no news.
+        log.info("UPS low battery while on mains (%s): no shutdown, no push", ups_summary(v))
+        return 0
     if event == "ONBATT":
         if grid_out_since(grid) is None:
             grid_append(grid, when, "out")

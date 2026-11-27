@@ -132,6 +132,14 @@ class UpsEventTest(unittest.TestCase):
         self.assertIsNone(r2t.grid_after_boot(self.grid, lambda: ON_MAINS, lambda: boot))  # once
         self.assertEqual(len(self.grid_lines()), 3)
 
+    def test_low_battery_on_mains_pushes_nothing(self):
+        # a PC on the same UPS: full charge, but under 5 min left at its load
+        heavy = {**ON_MAINS, "ups.status": "OL CHRG LB", "battery.runtime": "228"}
+        self.assertEqual(self.event("LOWBATT", T0, heavy), 0)
+        self.assertEqual(self.server.pushes, [])
+        self.event("LOWBATT", T0, {})  # NUT can't tell: push, to be safe
+        self.assertEqual(self.server.pushes[-1]["priority"], 5)
+
     def test_other_events(self):
         for name, priority in (("COMMBAD", 4), ("NOCOMM", 4), ("COMMOK", 3), ("REPLBATT", 3)):
             self.event(name, T0)

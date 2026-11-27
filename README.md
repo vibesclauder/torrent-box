@@ -242,7 +242,9 @@ The box **shuts down at 40% battery or 5 minutes of runtime left**, whichever co
 (`[setup] ups_low_battery` changes the percent). NUT works that out itself instead of taking
 the UPS's own "low battery" signal, which often comes only at 20%. 40% leaves room for an
 ageing battery, whose runtime estimate gets too optimistic, and spares it deep discharges. A
-shutdown takes well under a minute.
+shutdown takes well under a minute. The runtime is the UPS's estimate at the present load, so with
+something heavy on the same UPS (a PC and monitors) it can drop under 5 minutes at full charge:
+NUT then calls the battery low while on mains, which shuts nothing down and pushes nothing.
 
 **Pushes** (ntfy and the browsers the start page is installed in, like everything else): a
 power cut (high priority), the battery low and the shutdown (urgent), the power back (with how
